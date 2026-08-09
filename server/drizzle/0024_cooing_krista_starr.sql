@@ -1,0 +1,1 @@
+ALTER TABLE "appointments" ALTER COLUMN "responsible_user_id" DROP NOT NULL;

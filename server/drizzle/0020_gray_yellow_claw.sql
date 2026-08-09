@@ -1,0 +1,3 @@
+ALTER TABLE "subscriptions" ADD COLUMN "billing_sync_claimed_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "subscriptions" ADD COLUMN "billing_sync_claim_token" varchar(100);--> statement-breakpoint
+ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_billing_sync_claim_check" CHECK (("subscriptions"."billing_sync_claimed_at" is null) = ("subscriptions"."billing_sync_claim_token" is null));

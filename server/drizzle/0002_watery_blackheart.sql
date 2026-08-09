@@ -1,0 +1,1 @@
+ALTER TABLE "properties" ADD COLUMN "public_link_token_ciphertext" text;

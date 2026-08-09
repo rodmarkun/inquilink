@@ -1,0 +1,125 @@
+services:
+  db:
+    profiles: ["demo"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: inquilink
+      POSTGRES_USER: inquilink
+      POSTGRES_PASSWORD: inquilink_local
+    volumes:
+      - inquilink-postgres:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inquilink -d inquilink"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: postgres://inquilink:inquilink_local@db:5432/inquilink
+      APP_ORIGIN: http://localhost:8080
+      TRUSTED_PROXY_RANGES: 172.30.0.10/32
+      COOKIE_SECURE: "false"
+      ALLOW_LOCAL_PROVIDERS: "true"
+      EMAIL_TRANSPORT: smtp
+      BODY_LIMIT_BYTES: 15000000
+      DOCUMENT_STORAGE_PATH: /app/data/documents
+      DOCUMENT_STORAGE_MODE: local
+      MALWARE_SCANNER_MODE: local
+      DOCUMENT_MAX_BYTES: 10485760
+      DOCUMENT_ACCESS_TTL_SECONDS: 300
+      PUBLIC_LINK_VAULT_SECRET: inquilink-local-public-link-vault-secret-2026
+      DOCUMENT_ACCESS_TOKEN_SECRET: inquilink-local-document-access-token-secret-2026
+      LOG_LEVEL: info
+      SEED_DEMO: "true"
+    volumes:
+      - inquilink-documents:/app/data/documents
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  email-worker:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    command: ["node", "dist/workers/email.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://inquilink:inquilink_local@db:5432/inquilink
+      APP_ORIGIN: http://localhost:8080
+      ALLOW_LOCAL_PROVIDERS: "true"
+      EMAIL_TRANSPORT: smtp
+      EMAIL_SMTP_HOST: mailpit
+      EMAIL_SMTP_PORT: 1025
+      EMAIL_SMTP_SECURE: "false"
+      EMAIL_FROM: no-reply@inquilink.local
+      EMAIL_WORKER_INTERVAL_MS: 15000
+      DOCUMENT_STORAGE_PATH: /app/data/documents
+      DOCUMENT_STORAGE_MODE: local
+      COOKIE_SECURE: "false"
+      PUBLIC_LINK_VAULT_SECRET: inquilink-local-public-link-vault-secret-2026
+      DOCUMENT_ACCESS_TOKEN_SECRET: inquilink-local-document-access-token-secret-2026
+    volumes:
+      - inquilink-documents:/app/data/documents
+    depends_on:
+      api:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/inquilink-email-worker-heartbeat && test -n \"$(find /tmp/inquilink-email-worker-heartbeat -mmin -1 -print)\""]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  mailpit:
+    profiles: ["demo"]
+    image: axllent/mailpit:v1.30.0
+    ports:
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8025/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    profiles: ["demo"]
+    build:
+      context: .
+    container_name: inquilink-web
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
+    restart: unless-stopped
+
+volumes:
+  inquilink-postgres:
+  inquilink-documents:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
