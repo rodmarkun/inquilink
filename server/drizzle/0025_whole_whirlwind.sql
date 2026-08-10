@@ -1,0 +1,2 @@
+ALTER TABLE "billing_operations" DROP CONSTRAINT "billing_operations_operation_check";--> statement-breakpoint
+ALTER TABLE "billing_operations" ADD CONSTRAINT "billing_operations_operation_check" CHECK ("billing_operations"."operation" in ('create_trial', 'update_payment_method', 'change_plan', 'cancel', 'reactivate'));

@@ -22,12 +22,38 @@ export const PRICES = {
   inmobiliaria: PLAN_DEFINITIONS.inmobiliaria.priceCents,
 } as const;
 
+export async function assertPlanSupportsCurrentUsage(db: Database, agencyId: string, plan: PlanCode, at: Date): Promise<void> {
+  const definition = PLAN_DEFINITIONS[plan];
+  const [listingRows, memberRows, invitationRows] = await Promise.all([
+    db.select({ value: count() }).from(properties).where(and(eq(properties.agencyId, agencyId), inArray(properties.state, ["published", "paused"]))),
+    db.select({ value: count() }).from(agencyMemberships).where(eq(agencyMemberships.agencyId, agencyId)),
+    db.select({ value: count() }).from(agencyInvitations).where(and(
+      eq(agencyInvitations.agencyId, agencyId), isNull(agencyInvitations.acceptedAt), isNull(agencyInvitations.revokedAt), gt(agencyInvitations.expiresAt, at),
+    )),
+  ]);
+  const usage = {
+    listings: Number(listingRows[0]?.value ?? 0),
+    accounts: Number(memberRows[0]?.value ?? 0) + Number(invitationRows[0]?.value ?? 0),
+  };
+  if (usage.listings > definition.listingLimit || (definition.accountLimit !== null && usage.accounts > definition.accountLimit)) {
+    throw new ApiError(
+      409,
+      "PLAN_DOWNGRADE_LIMIT_EXCEEDED",
+      `El uso actual supera los límites del plan ${definition.name}. Archiva anuncios o reduce las cuentas e invitaciones pendientes antes de cambiar.`,
+      { plan, usage, limits: { listings: definition.listingLimit, accounts: definition.accountLimit } },
+    );
+  }
+}
+
 async function effectivePlan(db: Database, agencyId: string): Promise<PlanCode> {
-  const rows = await db.select({ plan: subscriptions.plan, state: subscriptions.state })
+  const rows = await db.select({ plan: subscriptions.plan, state: subscriptions.state, pendingBillingOperationId: subscriptions.pendingBillingOperationId })
     .from(subscriptions).where(eq(subscriptions.agencyId, agencyId)).limit(1);
   const subscription = rows[0];
   if (!subscription) {
     throw new ApiError(409, "SUBSCRIPTION_REQUIRED", "Activa un plan para publicar anuncios o añadir personas al espacio.");
+  }
+  if (subscription.pendingBillingOperationId) {
+    throw new ApiError(409, "BILLING_TRANSITION_IN_PROGRESS", "Hay una actualización de facturación en curso. Espera a que termine antes de aumentar el uso del plan.");
   }
   if (!["trialing", "active", "past_due"].includes(subscription.state)) {
     throw new ApiError(409, "SUBSCRIPTION_INACTIVE", "Tu suscripción no está activa. Revisa Facturación para continuar.");

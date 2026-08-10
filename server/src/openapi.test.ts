@@ -1,4 +1,6 @@
 import { validate } from "@readme/openapi-parser";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { createTestApp } from "./test/test-app.js";
 
@@ -45,6 +47,47 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   expect(Object.keys(dashboard.properties).sort()).toEqual(["newApplicants", "upcomingViewings"]);
   expect(document.paths["/api/v1/agency/team"].get.responses["200"].content["application/json"].schema.properties.data.properties.members.items.required)
     .toEqual(["userId", "fullName", "email", "role", "joinedAt"]);
+  for (const operation of [
+    document.paths["/api/v1/agency/properties"].get,
+    document.paths["/api/v1/agency/properties/{propertyId}/applications"].get,
+    document.paths["/api/v1/agency/appointments"].get,
+    document.paths["/api/v1/agency/team"].get,
+    document.paths["/api/v1/agency/team/invitations"].get,
+  ]) {
+    expect(operation.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ in: "query", name: "page", schema: expect.objectContaining({ minimum: 1, default: 1 }) }),
+      expect.objectContaining({ in: "query", name: "pageSize", schema: expect.objectContaining({ maximum: 100, default: 25 }) }),
+    ]));
+    expect(operation.responses["200"].content["application/json"].schema.properties.data.properties.pagination.required)
+      .toEqual(["page", "pageSize", "total", "totalPages", "hasMore"]);
+  }
+  expect(document.paths["/api/v1/agency/team"].get.responses["200"].content["application/json"].schema.properties.data.properties.pagination.required)
+    .toEqual(["page", "pageSize", "total", "totalPages", "hasMore"]);
+  const propertyListSchema = document.paths["/api/v1/agency/properties"].get.responses["200"].content["application/json"].schema;
+  const applicationListSchema = document.paths["/api/v1/agency/properties/{propertyId}/applications"].get.responses["200"].content["application/json"].schema;
+  const applicationDetailSchema = document.paths["/api/v1/agency/applications/{applicationId}"].get.responses["200"].content["application/json"].schema;
+  const viewingSchema = propertyListSchema.properties.data.properties.properties.items.properties.nextViewing.anyOf[0];
+  expect(viewingSchema.required).toEqual(["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "instructions", "internalNote", "createdAt", "updatedAt"]);
+  expect(applicationDetailSchema.properties.data.required).toEqual(["application", "applicant", "responsibleUser", "property", "documents", "possibleDuplicate", "notes", "statusHistory", "appointments", "activity"]);
+
+  const ajv = new Ajv2020({ strict: false });
+  addFormats(ajv);
+  const id = "95000000-0000-4000-8000-000000000001";
+  const propertyId = "95000000-0000-4000-8000-000000000002";
+  const applicationId = "95000000-0000-4000-8000-000000000003";
+  const at = "2026-08-09T10:00:00.000Z";
+  const pagination = { page: 1, pageSize: 25, total: 1, totalPages: 1, hasMore: false };
+  const property = { id: propertyId, agencyId: id, internalReference: "MAD-1", title: "Piso", address: null, city: "Madrid", province: "Madrid", monthlyRentCents: 120000, state: "published", coverImageUrl: null, createdAt: at, updatedAt: at };
+  const viewing = { id, agencyId: id, propertyId, applicationId, responsibleUserId: null, startsAt: at, durationMinutes: 30, state: "scheduled", instructions: null, internalNote: null, createdAt: at, updatedAt: at };
+  const applicationPayload = { id: applicationId, agencyId: id, propertyId, tenantUserId: id, responsibleUserId: null, status: "new", documentState: "not_requested", submittedAt: at, phone: "+34612345678", individualNetMonthlyIncomeCents: 200000, householdNetMonthlyIncomeCents: 300000, adultOccupants: 1, minorOccupants: 0, intendedMoveInDate: "2026-10-01", applicationDataPromotedAt: at, adultProfiles: [], draftData: {}, createdAt: at, updatedAt: at };
+  for (const [schema, payload] of [
+    [propertyListSchema, { data: { properties: [{ property, applicantCount: 1, newApplicantCount: 1, recentNewApplicantCount: 1, nextViewing: viewing }], pagination } }],
+    [applicationListSchema, { data: { applications: [{ application: applicationPayload, tenantName: "Ana Pérez", tenantEmail: "ana@example.es", responsibleUserName: null, nextViewing: viewing, possibleDuplicate: null }], pagination } }],
+    [applicationDetailSchema, { data: { application: applicationPayload, applicant: { fullName: "Ana Pérez", email: "ana@example.es" }, responsibleUser: null, property, documents: [], possibleDuplicate: null, notes: [], statusHistory: [], appointments: [viewing], activity: [{ id: `submitted:${applicationId}`, type: "application_submitted", actorUserId: id, createdAt: at, metadata: {} }] } }],
+  ] as const) {
+    const validatePayload = ajv.compile(schema);
+    expect(validatePayload(payload), JSON.stringify(validatePayload.errors)).toBe(true);
+  }
   expect(document.paths["/api/v1/account/profile"].get.responses["200"].content["application/json"].schema.properties.data.properties.profile.required)
     .toEqual(["id", "fullName", "email", "accountType"]);
   expect(document.paths["/api/v1/agency/settings"].get.responses["200"].content["application/json"].schema.properties.data.properties.agency.required)
@@ -67,7 +110,8 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   const tenantApplications = document.paths["/api/v1/tenant/applications"].get;
   expect(Object.keys(tenantApplications.responses).sort()).toEqual(["200", "401", "403", "500"]);
   const tenantApplicationItem = tenantApplications.responses["200"].content["application/json"].schema.properties.data.properties.applications.items;
-  expect(tenantApplicationItem.required).toEqual(["application", "property"]);
+  expect(tenantApplicationItem.required).toEqual(["application", "property", "resumePath"]);
+  expect(tenantApplicationItem.properties.resumePath.type).toEqual(["string", "null"]);
   expect(tenantApplicationItem.properties.application.required).toEqual(["id", "status", "documentState", "submittedAt", "updatedAt"]);
   expect(tenantApplicationItem.properties.application.properties.status.enum).toEqual(["new", "preselected", "selected", "rejected", "withdrawn"]);
   expect(tenantApplicationItem.properties.application.properties.documentState.enum).toEqual(["complete", "missing", "not_requested"]);
@@ -75,7 +119,12 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   expect(tenantApplicationItem.properties.property.required).toEqual(["id", "title", "publicLocation", "coverImageUrl"]);
   const propertyCreate = document.paths["/api/v1/agency/properties"].post.requestBody.content["application/json"].schema;
   expect(propertyCreate.properties.monthlyRentCents).toMatchObject({ minimum: 1, maximum: 100000000 });
-  expect(propertyCreate.properties.requestedDocumentCategories.items.enum).toEqual(["payslips", "employment_contract", "self_employed_income", "supporting"]);
+  expect(propertyCreate.properties.requestedDocumentCategories.items.enum).toEqual(["payslips", "employment_contract", "self_employed_income", "irpf_tax_return", "employment_history", "pension_proof", "guarantor_proof", "supporting"]);
+  const fiscalProfilePatch = document.paths["/api/v1/billing/fiscal-profile"].patch;
+  expect(fiscalProfilePatch.requestBody.content["application/json"].schema.required).toEqual(["fiscalId", "billingName", "billingAddress"]);
+  expect(Object.keys(fiscalProfilePatch.responses).sort()).toEqual(["200", "400", "401", "403", "409", "422", "500", "503"]);
+  expect(fiscalProfilePatch.parameters.filter((parameter: any) => parameter.in === "header" && String(parameter.name).toLowerCase() === "idempotency-key")).toHaveLength(1);
+  expect(document.paths["/api/v1/tenant/applications/{applicationId}/documents"].post.requestBody.content["application/json"].schema.properties).toHaveProperty("adultProfileId");
   const appointment = document.paths["/api/v1/agency/appointments"].post.requestBody.content["application/json"].schema;
   expect(appointment.properties.durationMinutes).toMatchObject({ minimum: 15, maximum: 480 });
   const application = document.paths["/api/v1/tenant/applications/by-link/{token}/submit"].post.requestBody.content["application/json"].schema.properties.application;

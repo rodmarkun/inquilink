@@ -12,7 +12,7 @@ describe("authentication", () => {
     const context = await createTestApp(); resources.push(context);
     const registration = await context.app.inject({
       method: "POST", url: "/api/v1/auth/agency/register",
-      payload: { fullName: "Ana García", agencyName: "Sol Madrid", email: "ANA@EXAMPLE.ES", phone: "+34600111222", password: "contraseña-segura", termsAccepted: true, termsVersion: "terms-2026-08-v1" },
+      payload: { fullName: "Ana García", agencyName: "Sol Madrid", email: "ANA@EXAMPLE.ES", phone: "+34600111222", fiscalId: "B-12345678", billingName: "Sol Madrid SL", billingAddress: "Calle Mayor 1, 28013 Madrid", password: "contraseña-segura", termsAccepted: true, termsVersion: "terms-2026-08-v1", returnPath: "/registro?verificado=1&plan=inmobiliaria" },
     });
     expect(registration.statusCode).toBe(201);
     const registrationBody = registration.json();
@@ -23,6 +23,7 @@ describe("authentication", () => {
       method: "POST", url: "/api/v1/auth/verify-email", payload: { token: registrationBody.data.debugToken },
     });
     expect(verification.statusCode).toBe(200);
+    expect(verification.json().data.returnPath).toBe("/registro?verificado=1&plan=inmobiliaria");
     const cookie = cookieFrom(verification);
     const me = await context.app.inject({ method: "GET", url: "/api/v1/auth/me", headers: { cookie } });
     expect(me.statusCode).toBe(200);
@@ -30,6 +31,7 @@ describe("authentication", () => {
       user: { kind: "agency", email: "ana@example.es", emailVerified: true },
       agency: { name: "Sol Madrid", role: "admin" },
     });
+    expect((await context.db.select().from(agencies))[0]).toMatchObject({ fiscalId: "B12345678", billingName: "Sol Madrid SL", billingAddress: "Calle Mayor 1, 28013 Madrid" });
   });
 
   it("preserves the property path through tenant verification and invalidates reset tokens after one use", async () => {
@@ -92,6 +94,31 @@ describe("authentication", () => {
     const response = await context.app.inject({ method: "POST", url: "/api/v1/auth/forgot-password", payload: { email: "nadie@example.es", accountType: "tenant" } });
     expect(response.statusCode).toBe(200);
     expect(response.json().data).not.toHaveProperty("debugToken");
+  });
+
+  it("resends verification without exposing account existence or verified state", async () => {
+    const context = await createTestApp(); resources.push(context);
+    const registration = await context.app.inject({
+      method: "POST", url: "/api/v1/auth/agency/register",
+      payload: { fullName: "Ana García", agencyName: "Sol Madrid", email: "reenviar@example.es", phone: "+34600111222", password: "contraseña-segura", termsAccepted: true, termsVersion: "terms-2026-08-v1" },
+    });
+    const resent = await context.app.inject({
+      method: "POST", url: "/api/v1/auth/resend-verification",
+      payload: { email: "REENVIAR@EXAMPLE.ES", accountType: "agency", returnPath: "/registro?verificado=1" },
+    });
+    expect(resent.statusCode).toBe(200);
+    expect(resent.json().data).toMatchObject({ message: expect.stringContaining("Si la cuenta") });
+    expect(resent.json().data.debugToken).toEqual(expect.any(String));
+    expect(context.emailProvider.messages.filter((message) => message.template === "verify_email")).toHaveLength(2);
+
+    const verified = await context.app.inject({ method: "POST", url: "/api/v1/auth/verify-email", payload: { token: registration.json().data.debugToken } });
+    expect(verified.statusCode).toBe(200);
+    const alreadyVerified = await context.app.inject({ method: "POST", url: "/api/v1/auth/resend-verification", payload: { email: "reenviar@example.es", accountType: "agency" } });
+    const missing = await context.app.inject({ method: "POST", url: "/api/v1/auth/resend-verification", payload: { email: "nadie@example.es", accountType: "agency" } });
+    expect(alreadyVerified.statusCode).toBe(200);
+    expect(missing.statusCode).toBe(200);
+    expect(alreadyVerified.json().data).toEqual(missing.json().data);
+    expect(context.emailProvider.messages.filter((message) => message.template === "verify_email")).toHaveLength(2);
   });
 
   it("rolls registration back when its verification message cannot be enqueued", async () => {

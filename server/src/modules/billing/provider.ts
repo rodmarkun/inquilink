@@ -8,6 +8,12 @@ export interface CreatedSubscription {
   trialEndsAt: Date;
 }
 
+export interface BillingFiscalProfile {
+  fiscalId: string;
+  billingName: string;
+  billingAddress: string;
+}
+
 export interface BillingProviderInvoiceSnapshot {
   providerInvoiceRef: string;
   amountCents: number;
@@ -33,9 +39,11 @@ export class BillingProviderError extends Error {
 }
 
 export interface BillingProvider {
-  createTrial(input: { agencyId: string; plan: "particular" | "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; idempotencyKey: string }): Promise<CreatedSubscription>;
+  createTrial(input: { agencyId: string; plan: "particular" | "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<CreatedSubscription>;
+  updateCustomerFiscalProfile(input: { customerRef: string; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<void>;
   cancel(input: { subscriptionRef: string; idempotencyKey: string }): Promise<void>;
   reactivate(input: { subscriptionRef: string; idempotencyKey: string }): Promise<void>;
+  changePlan(input: { subscriptionRef: string; plan: "particular" | "professional" | "inmobiliaria"; idempotencyKey: string }): Promise<void>;
   updatePaymentMethod(input: { customerRef: string; paymentMethodToken: string; idempotencyKey: string }): Promise<{ paymentMethodDisplay: string }>;
   reconcileTrial?(input: { agencyId: string; idempotencyKey: string }): Promise<CreatedSubscription | null>;
   syncSubscription?(input: { subscriptionRef: string }): Promise<BillingProviderSubscriptionSnapshot | null>;
@@ -47,7 +55,7 @@ export function billingProviderOperationKey(operationId: string): string {
 
 /** Deterministic local provider. It accepts only a provider token and never raw card data. */
 export class LocalBillingProvider implements BillingProvider {
-  async createTrial(input: { agencyId: string; plan: "particular" | "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; idempotencyKey: string }): Promise<CreatedSubscription> {
+  async createTrial(input: { agencyId: string; plan: "particular" | "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<CreatedSubscription> {
     if (!input.paymentMethodToken.startsWith("pm_")) {
       throw new BillingProviderError("declined");
     }
@@ -61,7 +69,9 @@ export class LocalBillingProvider implements BillingProvider {
   }
 
   async cancel(_input: { subscriptionRef: string; idempotencyKey: string }): Promise<void> {}
+  async updateCustomerFiscalProfile(_input: { customerRef: string; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<void> {}
   async reactivate(_input: { subscriptionRef: string; idempotencyKey: string }): Promise<void> {}
+  async changePlan(_input: { subscriptionRef: string; plan: "particular" | "professional" | "inmobiliaria"; idempotencyKey: string }): Promise<void> {}
   async updatePaymentMethod(input: { customerRef: string; paymentMethodToken: string; idempotencyKey: string }): Promise<{ paymentMethodDisplay: string }> {
     if (!input.paymentMethodToken.startsWith("pm_")) throw new BillingProviderError("declined");
     return { paymentMethodDisplay: "Tarjeta terminada en 4242" };
@@ -123,18 +133,24 @@ export class WebhookBillingProvider implements BillingProvider {
     return expectJson && response.status !== 204 ? response.json() : {};
   }
 
-  async createTrial(input: { agencyId: string; plan: "particular" | "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; idempotencyKey: string }): Promise<CreatedSubscription> {
+  async createTrial(input: { agencyId: string; plan: "particular" | "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<CreatedSubscription> {
     const created = createdSubscriptionSchema.parse(await this.request("subscriptions/trial", {
       agencyId: input.agencyId, plan: input.plan, paymentMethodToken: input.paymentMethodToken,
-      activationRequestedAt: input.activationRequestedAt.toISOString(),
+      activationRequestedAt: input.activationRequestedAt.toISOString(), fiscalProfile: input.fiscalProfile,
     }, input.idempotencyKey));
     return { ...created, trialEndsAt: new Date(created.trialEndsAt) };
+  }
+  async updateCustomerFiscalProfile(input: { customerRef: string; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<void> {
+    await this.request("customers/fiscal-profile", { customerRef: input.customerRef, fiscalProfile: input.fiscalProfile }, input.idempotencyKey, false);
   }
   async cancel(input: { subscriptionRef: string; idempotencyKey: string }): Promise<void> {
     await this.request("subscriptions/cancel", { subscriptionRef: input.subscriptionRef }, input.idempotencyKey, false);
   }
   async reactivate(input: { subscriptionRef: string; idempotencyKey: string }): Promise<void> {
     await this.request("subscriptions/reactivate", { subscriptionRef: input.subscriptionRef }, input.idempotencyKey, false);
+  }
+  async changePlan(input: { subscriptionRef: string; plan: "particular" | "professional" | "inmobiliaria"; idempotencyKey: string }): Promise<void> {
+    await this.request("subscriptions/change-plan", { subscriptionRef: input.subscriptionRef, plan: input.plan }, input.idempotencyKey, false);
   }
   async updatePaymentMethod(input: { customerRef: string; paymentMethodToken: string; idempotencyKey: string }): Promise<{ paymentMethodDisplay: string }> {
     return paymentMethodSchema.parse(await this.request("payment-methods/update", {

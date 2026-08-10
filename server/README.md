@@ -47,11 +47,13 @@ The billing URL is a base URL; the following paths are appended while preserving
 
 | Path | Idempotency-Key | Request JSON | Successful response |
 | --- | --- | --- | --- |
-| `subscriptions/trial` | required; stable `billing-operation:<uuid>` | `{agencyId, plan: "particular"|"professional"|"inmobiliaria", paymentMethodToken, activationRequestedAt: ISO-8601}` | `{customerRef, subscriptionRef, paymentMethodDisplay: "Tarjeta terminada en 1234", trialEndsAt: ISO-8601}` |
+| `subscriptions/trial` | required; stable `billing-operation:<uuid>` | `{agencyId, plan: "particular"|"professional"|"inmobiliaria", paymentMethodToken, activationRequestedAt: ISO-8601, fiscalProfile: {fiscalId, billingName, billingAddress}}` | `{customerRef, subscriptionRef, paymentMethodDisplay: "Tarjeta terminada en 1234", trialEndsAt: ISO-8601}` |
 | `subscriptions/trial/reconcile` | required; the original trial key | `{agencyId}` | the same trial object, or JSON `null` when that key definitely created no trial |
 | `subscriptions/cancel` | required | `{subscriptionRef}` | any 2xx; a body is ignored |
 | `subscriptions/reactivate` | required | `{subscriptionRef}` | any 2xx; a body is ignored |
+| `subscriptions/change-plan` | required | `{subscriptionRef, plan: "particular"|"professional"|"inmobiliaria"}` | any 2xx; a body is ignored |
 | `payment-methods/update` | required | `{customerRef, paymentMethodToken}` | `{paymentMethodDisplay: "Tarjeta terminada en 1234"}` |
+| `customers/fiscal-profile` | required; stable `billing-operation:<uuid>` | `{customerRef, fiscalProfile: {fiscalId, billingName, billingAddress}}` | any 2xx; a body is ignored |
 | `subscriptions/sync` | omitted | `{subscriptionRef}` | `{state, trialEndsAt, currentPeriodEndsAt, cancelAtPeriodEnd, paymentMethodDisplay, invoices}` |
 
 `state` is `trialing`, `active`, `past_due`, or `cancelled`; the two dates and payment display may be `null`. `invoices` contains at most 100 items shaped as `{providerInvoiceRef, amountCents, currency, status, issuedAt, hostedUrl}`. Amounts are non-negative signed 32-bit integers, currency is a three-letter uppercase code, status is `open`, `paid`, `past_due`, `void`, or `uncollectible`, and `hostedUrl` may be `null`. Trial creation and reconciliation must return the provider-authoritative `trialEndsAt`; Inquilink never recalculates it after a delayed response. For mutation calls only, HTTP 402 or 422 is a definitive decline. Network/timeout errors and every other non-2xx status are ambiguous/retryable, so the gateway must deduplicate the stable key. Sync non-2xx responses are retried with persisted backoff.
@@ -71,6 +73,10 @@ All routes are prefixed `/api/v1`. Successful resources use `{ "data": ... }`. E
 }
 ```
 
+Agency list endpoints for properties, property applicants, appointments, team members, and pending invitations accept `page` (default `1`) and `pageSize` (default `25`, maximum `100`). Their existing array key is unchanged and `data.pagination` reports `{page, pageSize, total, totalPages, hasMore}`. Ordering includes an immutable ID tie-breaker so adjacent pages are deterministic.
+
+Submitted application phone, individual/household monthly income, household counts, and intended move-in date are also stored in typed columns for indexed search, sorting, and reporting. `draft_data` remains the canonical compatible draft/submission snapshot. Schema migrations `0026`/`0028` add nullable columns without rewriting existing rows; `0029` installs a compatibility trigger so old application instances remain safe throughout a rolling deployment. The supported `npm run db:migrate` runner then backfills submitted rows in independently committed marker-driven batches and builds the five supporting indexes concurrently, repairing interrupted invalid builds before retrying. A persisted promotion marker makes the backfill resumable and prevents repeat rewrites; malformed legacy values remain `NULL` rather than aborting the migration.
+
 Authentication routes are split by account type because the same email may own an agency account and a tenant account. Login therefore requires `accountType: "agency" | "tenant"`. Tenant `returnPath` values preserve a property-link flow and accept only same-origin relative paths.
 
 Every agency-owned SQL read/write must include `agencyId` in its predicate. Every tenant-owned read/write must include `tenantUserId`. Missing or foreign records return the same `404` response to avoid resource discovery. Billing uses `requireAdmin`; collaborators cannot view or mutate billing.
@@ -84,6 +90,10 @@ The same worker polls authoritative provider subscription and invoice state, the
 Analytics uses a fixed event-name union and fixed scalar columns, never an arbitrary payload. Requests with extra fields are rejected. Agency summaries are always filtered by the authenticated workspace.
 
 Document bytes are kept behind `PrivateDocumentStorage`; metadata alone is stored in PostgreSQL. Downloads require both an authenticated owner/workspace member and a short-lived subject-bound bearer token in the `Authorization` header. Tokens never enter request URLs. Failed deletion retains a retryable database tombstone and the only cleanup key. The local storage adapter is deterministic development infrastructure, not a production object store or malware scanner.
+
+Spanish-market applications keep one verified tenant account while `adultProfiles` records the primary applicant and co-applicants/adult occupants with separate identity, employment, income, and document ownership. Every category requested by a property is required for each recorded adult. Supported categories include nóminas, contrato, autónomo, declaración IRPF, vida laboral, pensión, aval and general supporting documents. Migration `0027_nappy_vision` backfills legacy applications and documents to the `primary` adult profile.
+
+Agency registration accepts fiscal ID, billing name, and billing address. Trial activation sends that complete profile to the provider customer. Administrators can later update it through idempotent `PATCH /api/v1/billing/fiscal-profile`; when a provider customer exists, the external update succeeds before the local profile is committed, while ambiguous outcomes remain reserved for a same-key retry. `GET /api/v1/billing/status` returns the current fiscal profile. Submitted applications also persist normalized email/phone comparison keys. Agency applicant list and detail responses expose an informational `possibleDuplicate` signal only for matches within the same property; records are never merged, rejected, or status-changed automatically.
 
 ## Main endpoint groups
 

@@ -1,9 +1,10 @@
-import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Database } from "../../db/client.js";
 import { agencies, agencyClosureCleanup, agencyMemberships, applicationDocuments, applications, documentStorageCleanup, properties, users } from "../../db/schema.js";
 import type { PrivateDocumentStorage } from "./storage.js";
 import { hashSecret, newId, newSecret } from "../../lib/ids.js";
 import { lockAgencyForSystem } from "../agency-lock.js";
+import { PROPERTY_COVER_STAGING_CLEANUP_REASON, PROPERTY_COVER_STAGING_LEASE_MS, PROPERTY_COVER_STAGING_REASON, propertyImageStorageKeyFromUrl } from "../property-images/storage-key.js";
 
 const CLAIM_LEASE_MS = 5 * 60_000;
 const INITIAL_RETRY_MS = 30_000;
@@ -132,7 +133,16 @@ export async function runDataLifecycle(
     await enqueueDocumentDeletion(db, claimed[0], now, claimed[0].malwareScanState === "pending" ? "DOCUMENT_STAGING_CLEANUP" : "DOCUMENT_TOMBSTONE");
   }
 
+  // A live cover upload renews this explicit lease and is excluded from the
+  // generic cleanup queue. A crashed uploader stops renewing and is promoted.
+  const abandonedCoverStagingBefore = new Date(now.getTime() - PROPERTY_COVER_STAGING_LEASE_MS);
+  await db.update(documentStorageCleanup).set({
+    reason: PROPERTY_COVER_STAGING_CLEANUP_REASON, nextAttemptAt: now,
+    claimedAt: null, claimToken: null, updatedAt: now,
+  }).where(and(eq(documentStorageCleanup.reason, PROPERTY_COVER_STAGING_REASON), lte(documentStorageCleanup.updatedAt, abandonedCoverStagingBefore)));
+
   const cleanupCandidates = await db.select().from(documentStorageCleanup).where(and(
+    ne(documentStorageCleanup.reason, PROPERTY_COVER_STAGING_REASON),
     lte(documentStorageCleanup.nextAttemptAt, now),
     or(isNull(documentStorageCleanup.claimToken), lte(documentStorageCleanup.claimedAt, staleClaimBefore)),
   )).orderBy(asc(documentStorageCleanup.nextAttemptAt), asc(documentStorageCleanup.createdAt), asc(documentStorageCleanup.id)).limit(batchSize);
@@ -141,6 +151,7 @@ export async function runDataLifecycle(
     const claimedRows = await db.update(documentStorageCleanup).set({
       attempts: candidate.attempts + 1, claimedAt: now, claimToken, updatedAt: now,
     }).where(and(
+      ne(documentStorageCleanup.reason, PROPERTY_COVER_STAGING_REASON),
       eq(documentStorageCleanup.id, candidate.id), lte(documentStorageCleanup.nextAttemptAt, now),
       or(isNull(documentStorageCleanup.claimToken), lte(documentStorageCleanup.claimedAt, staleClaimBefore)),
     )).returning();
@@ -287,9 +298,42 @@ export async function runDataLifecycle(
       result.accountClosuresDeferred += 1;
       continue;
     }
+    const coverProperties = await db.select({ id: properties.id, coverImageUrl: properties.coverImageUrl, version: properties.version })
+      .from(properties).where(eq(properties.agencyId, claimedAgency.id));
+    const internalCovers = coverProperties.flatMap((property) => {
+      const storageKey = propertyImageStorageKeyFromUrl(property.coverImageUrl, property.id);
+      return storageKey ? [{ ...property, storageKey }] : [];
+    });
+    if (internalCovers.length) {
+      await db.transaction(async (tx) => {
+        const agencyRows = await tx.select({ accountPurgeClaimToken: agencies.accountPurgeClaimToken }).from(agencies)
+          .where(eq(agencies.id, claimedAgency.id)).for("update").limit(1);
+        if (agencyRows[0]?.accountPurgeClaimToken !== claimToken) return;
+        for (const cover of internalCovers) {
+          await tx.insert(documentStorageCleanup).values({
+            id: newId(), storageKey: cover.storageKey, agencyId: claimedAgency.id, applicationId: cover.id,
+            reason: "PROPERTY_COVER_ACCOUNT_CLOSURE", attempts: 0, nextAttemptAt: now, createdAt: now, updatedAt: now,
+          }).onConflictDoNothing({ target: documentStorageCleanup.storageKey });
+          await tx.update(properties).set({ coverImageUrl: null, version: cover.version + 1, updatedAt: now })
+            .where(and(eq(properties.id, cover.id), eq(properties.agencyId, claimedAgency.id), eq(properties.version, cover.version)));
+        }
+      });
+      await db.update(agencies).set({ accountPurgeClaimedAt: null, accountPurgeClaimToken: null, accountPurgeNextAttemptAt: new Date(now.getTime() + 15_000) })
+        .where(and(eq(agencies.id, claimedAgency.id), eq(agencies.accountPurgeClaimToken, claimToken)));
+      result.accountClosuresDeferred += 1;
+      continue;
+    }
     const documents = await db.select().from(applicationDocuments).where(eq(applicationDocuments.agencyId, claimedAgency.id));
     if (documents.length) {
       for (const document of documents) await enqueueDocumentDeletion(db, document, now);
+      await db.update(agencies).set({ accountPurgeClaimedAt: null, accountPurgeClaimToken: null, accountPurgeNextAttemptAt: new Date(now.getTime() + 15_000) })
+        .where(and(eq(agencies.id, claimedAgency.id), eq(agencies.accountPurgeClaimToken, claimToken)));
+      result.accountClosuresDeferred += 1;
+      continue;
+    }
+    const pendingStorageCleanup = await db.select({ id: documentStorageCleanup.id }).from(documentStorageCleanup)
+      .where(eq(documentStorageCleanup.agencyId, claimedAgency.id)).limit(1);
+    if (pendingStorageCleanup[0]) {
       await db.update(agencies).set({ accountPurgeClaimedAt: null, accountPurgeClaimToken: null, accountPurgeNextAttemptAt: new Date(now.getTime() + 15_000) })
         .where(and(eq(agencies.id, claimedAgency.id), eq(agencies.accountPurgeClaimToken, claimToken)));
       result.accountClosuresDeferred += 1;

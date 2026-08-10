@@ -18,8 +18,10 @@ class SnapshotProvider implements BillingProvider {
   failures = 0;
   readonly syncedRefs: string[] = [];
   async createTrial(): Promise<CreatedSubscription> { throw new Error("NOT_USED"); }
+  async updateCustomerFiscalProfile(): Promise<void> { throw new Error("NOT_USED"); }
   async cancel(): Promise<void> { throw new Error("NOT_USED"); }
   async reactivate(): Promise<void> { throw new Error("NOT_USED"); }
+  async changePlan(): Promise<void> { throw new Error("NOT_USED"); }
   async updatePaymentMethod(): Promise<{ paymentMethodDisplay: string }> { throw new Error("NOT_USED"); }
   async syncSubscription(input: { subscriptionRef: string }): Promise<BillingProviderSubscriptionSnapshot | null> {
     this.syncedRefs.push(input.subscriptionRef);

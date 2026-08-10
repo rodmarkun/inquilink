@@ -80,6 +80,21 @@ beforeEach(async () => {
 afterEach(async () => context.close());
 
 describe("agency operations", () => {
+  it("paginates team members and pending invitations", async () => {
+    await context.db.insert(agencyInvitations).values([
+      { id: "30000000-0000-4000-8000-000000000081", agencyId: agencyA, email: "uno@example.es", tokenHash: hashSecret("pagination-invitation-one"), expiresAt: new Date("2026-08-20T10:00:00.000Z"), createdAt: new Date("2026-08-08T09:00:00.000Z"), updatedAt: fixedNow },
+      { id: "30000000-0000-4000-8000-000000000082", agencyId: agencyA, email: "dos@example.es", tokenHash: hashSecret("pagination-invitation-two"), expiresAt: new Date("2026-08-20T10:00:00.000Z"), createdAt: new Date("2026-08-08T09:00:00.000Z"), updatedAt: fixedNow },
+    ]);
+    const members = await context.app.inject({ method: "GET", url: "/api/v1/agency/team?page=2&pageSize=1", headers: cookie("admin-a-token") });
+    expect(members.statusCode).toBe(200);
+    expect(members.json().data.members).toHaveLength(1);
+    expect(members.json().data.pagination).toEqual({ page: 2, pageSize: 1, total: 2, totalPages: 2, hasMore: false });
+    const invitations = await context.app.inject({ method: "GET", url: "/api/v1/agency/team/invitations?page=1&pageSize=1", headers: cookie("admin-a-token") });
+    expect(invitations.statusCode).toBe(200);
+    expect(invitations.json().data.invitations).toHaveLength(1);
+    expect(invitations.json().data.pagination).toEqual({ page: 1, pageSize: 1, total: 2, totalPages: 2, hasMore: true });
+  });
+
   it("returns the dashboard blocks and scopes every item to the agency", async () => {
     const response = await context.app.inject({ method: "GET", url: "/api/v1/agency/dashboard", headers: cookie("admin-a-token") });
     expect(response.statusCode).toBe(200);

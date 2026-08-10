@@ -22,6 +22,7 @@ import { createTestApp } from "../../test/test-app.js";
 import { MemoryPrivateDocumentStorage, type PrivateDocumentStorage, type StoredObject } from "./storage.js";
 import { runDataLifecycle } from "./lifecycle.js";
 import { AGENCY_RENTAL_MUTATION_ROUTES } from "./routes.js";
+import { AesGcmPublicLinkTokenVault } from "./public-link-vault.js";
 
 let context: Awaited<ReturnType<typeof createTestApp>>;
 let storage: FailingDeleteStorage;
@@ -156,7 +157,7 @@ const completeApplication = {
   email: "lucia@example.es",
   phone: "+34612144309",
   preferredContactChannel: "whatsapp",
-  adultOccupants: 2,
+  adultOccupants: 1,
   minorOccupants: 0,
   intendedMoveInDate: "2026-10-01",
   pets: "no",
@@ -217,6 +218,7 @@ beforeEach(async () => {
   } });
   const createdAt = new Date("2026-08-08T10:00:00.000Z");
   const passwordHash = await argon2.hash("test-password");
+  const publicLinkVault = new AesGcmPublicLinkTokenVault("test-public-link-vault-secret-32-bytes-minimum");
   await context.db.insert(users).values([
     { id: ids.adminA, kind: "agency", email: "admin-a@example.es", fullName: "Marta Soler", passwordHash, emailVerifiedAt: createdAt, createdAt, updatedAt: createdAt },
     { id: ids.collaboratorA, kind: "agency", email: "collab-a@example.es", fullName: "Diego García", passwordHash, emailVerifiedAt: createdAt, createdAt, updatedAt: createdAt },
@@ -234,8 +236,8 @@ beforeEach(async () => {
     { agencyId: ids.agencyB, userId: ids.adminB, role: "admin", createdAt },
   ]);
   await context.db.insert(properties).values([
-    { id: ids.propertyA, agencyId: ids.agencyA, responsibleUserId: ids.adminA, internalReference: "MAD-042", title: "Piso luminoso en Chamberí", city: "Madrid", province: "Madrid", monthlyRentCents: 145_000, state: "published", publicLinkTokenHash: hashSecret("valid-chamberi-public-link"), publicLinkIssuedAt: createdAt, ...publishedProperty, createdAt, updatedAt: createdAt },
-    { id: ids.propertyB, agencyId: ids.agencyB, responsibleUserId: ids.adminB, internalReference: "MAD-999", title: "Vivienda de otra agencia", city: "Madrid", province: "Madrid", monthlyRentCents: 120_000, state: "published", publicLinkTokenHash: hashSecret("other-agency-public-link"), publicLinkIssuedAt: createdAt, ...publishedProperty, createdAt, updatedAt: createdAt },
+    { id: ids.propertyA, agencyId: ids.agencyA, responsibleUserId: ids.adminA, internalReference: "MAD-042", title: "Piso luminoso en Chamberí", city: "Madrid", province: "Madrid", monthlyRentCents: 145_000, state: "published", publicLinkTokenHash: hashSecret("valid-chamberi-public-link"), publicLinkTokenCiphertext: publicLinkVault.seal(ids.propertyA, "valid-chamberi-public-link"), publicLinkIssuedAt: createdAt, ...publishedProperty, createdAt, updatedAt: createdAt },
+    { id: ids.propertyB, agencyId: ids.agencyB, responsibleUserId: ids.adminB, internalReference: "MAD-999", title: "Vivienda de otra agencia", city: "Madrid", province: "Madrid", monthlyRentCents: 120_000, state: "published", publicLinkTokenHash: hashSecret("other-agency-public-link"), publicLinkTokenCiphertext: publicLinkVault.seal(ids.propertyB, "other-agency-public-link"), publicLinkIssuedAt: createdAt, ...publishedProperty, createdAt, updatedAt: createdAt },
   ]);
   await context.db.insert(subscriptions).values([
     { id: "10000000-0000-4000-8000-000000000090", agencyId: ids.agencyA, plan: "inmobiliaria", state: "active", createdAt, updatedAt: createdAt },
@@ -368,6 +370,12 @@ describe("property and public-link lifecycle", () => {
     expect((await context.app.inject({ method: "POST", url: `/api/v1/agency/properties/${propertyId}/archive`, headers: { cookie: cookies.adminA }, payload: { expectedVersion: 4 } })).statusCode).toBe(200);
     const cannotRepublish = await context.app.inject({ method: "POST", url: `/api/v1/agency/properties/${propertyId}/publish`, headers: { cookie: cookies.adminA, "idempotency-key": "property-publish-archived" }, payload: { expectedVersion: 5 } });
     expect(cannotRepublish.statusCode).toBe(409);
+    const protectedEdit = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/properties/${propertyId}`, headers: { cookie: cookies.adminA }, payload: { title: "Estudio archivado", expectedVersion: 5 } });
+    expect(protectedEdit.statusCode).toBe(200);
+    expect(protectedEdit.json().data.property.version).toBe(6);
+    const staleEdit = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/properties/${propertyId}`, headers: { cookie: cookies.adminA }, payload: { title: "Edición obsoleta", expectedVersion: 5 } });
+    expect(staleEdit.statusCode).toBe(409);
+    expect(staleEdit.json().error.code).toBe("PROPERTY_CHANGED");
   });
 
   it("serializes concurrent Particular publishes, counts paused listings, and blocks an over-limit downgrade", async () => {
@@ -462,6 +470,46 @@ describe("property and public-link lifecycle", () => {
 });
 
 describe("authenticated tenant submission", () => {
+  it("keeps co-applicants in one account while requiring document ownership for every adult", async () => {
+    const coApplicantId = "8a7ef94a-2f92-44f5-a48d-0360644959f7";
+    const application = { ...completeApplication, adultOccupants: 2, additionalAdults: [{ id: coApplicantId, fullName: "Mario Martín", email: "mario@example.es", phone: "+34699888777", employmentStatus: "Trabajo por cuenta ajena", employerOrActivity: "Estudio Norte", contractType: "Indefinido", netMonthlyIncomeCents: 170_000 }] };
+    const partialDraft = await context.app.inject({ method: "PUT", url: "/api/v1/tenant/application-drafts/by-link/valid-chamberi-public-link", headers: { cookie: cookies.tenantA }, payload: { adultOccupants: 2, additionalAdults: [{ id: coApplicantId, fullName: "", email: null, phone: null, employmentStatus: "", employerOrActivity: "", contractType: "", netMonthlyIncomeCents: 0 }] } });
+    expect(partialDraft.statusCode).toBe(201);
+    const draft = await context.app.inject({ method: "PUT", url: "/api/v1/tenant/application-drafts/by-link/valid-chamberi-public-link", headers: { cookie: cookies.tenantA }, payload: application });
+    expect(draft.statusCode).toBe(200);
+    const applicationId = draft.json().data.applicationId as string;
+    const pdf = Buffer.from("%PDF-adult-owned").toString("base64");
+    for (const category of ["payslips", "employment_contract"] as const) {
+      expect((await context.app.inject({ method: "POST", url: `/api/v1/tenant/applications/${applicationId}/documents`, headers: { cookie: cookies.tenantA }, payload: { adultProfileId: "primary", category, originalName: `${category}.pdf`, contentType: "application/pdf", dataBase64: pdf } })).statusCode).toBe(201);
+    }
+    const incomplete = await context.app.inject({ method: "POST", url: "/api/v1/tenant/applications/by-link/valid-chamberi-public-link/submit", headers: { cookie: cookies.tenantA }, payload: { application, consentVersion: "privacy-2026-08-v1", privacyConsent: true, submissionKey: "co-applicant-submit-0001" } });
+    expect(incomplete.statusCode).toBe(422);
+    expect(incomplete.json().error.details.missingByAdult).toEqual([{ adultProfileId: coApplicantId, categories: ["payslips", "employment_contract"] }]);
+    for (const category of ["payslips", "employment_contract"] as const) {
+      expect((await context.app.inject({ method: "POST", url: `/api/v1/tenant/applications/${applicationId}/documents`, headers: { cookie: cookies.tenantA }, payload: { adultProfileId: coApplicantId, category, originalName: `${category}-mario.pdf`, contentType: "application/pdf", dataBase64: pdf } })).statusCode).toBe(201);
+    }
+    const submitted = await context.app.inject({ method: "POST", url: "/api/v1/tenant/applications/by-link/valid-chamberi-public-link/submit", headers: { cookie: cookies.tenantA }, payload: { application, consentVersion: "privacy-2026-08-v1", privacyConsent: true, submissionKey: "co-applicant-submit-0001" } });
+    expect(submitted.statusCode).toBe(201);
+    expect(submitted.json().data.application.adultProfiles.map((adult: { id: string }) => adult.id)).toEqual(["primary", coApplicantId]);
+    expect((await context.db.select().from(applicationDocuments)).map((document) => document.adultProfileId).sort()).toEqual([coApplicantId, coApplicantId, "primary", "primary"].sort());
+  });
+
+  it("rejects missing and duplicate co-applicant profiles before submission", async () => {
+    const submit = (application: Record<string, unknown>, submissionKey: string) => context.app.inject({
+      method: "POST", url: "/api/v1/tenant/applications/by-link/valid-chamberi-public-link/submit",
+      headers: { cookie: cookies.tenantA },
+      payload: { application, consentVersion: "privacy-2026-08-v1", privacyConsent: true, submissionKey },
+    });
+    const missing = await submit({ ...completeApplication, adultOccupants: 2, additionalAdults: [] }, "missing-co-applicant-0001");
+    expect(missing.statusCode).toBe(400);
+
+    const duplicateId = "8a7ef94a-2f92-44f5-a48d-0360644959f7";
+    const adult = { id: duplicateId, fullName: "Mario Martín", email: null, phone: null, employmentStatus: "Empleado", employerOrActivity: "Empresa", contractType: "Indefinido", netMonthlyIncomeCents: 170_000 };
+    const duplicate = await submit({ ...completeApplication, adultOccupants: 3, additionalAdults: [adult, { ...adult, fullName: "María Martín" }] }, "duplicate-co-applicant-0001");
+    expect(duplicate.statusCode).toBe(400);
+    expect(await context.db.select().from(applications)).toHaveLength(0);
+  });
+
   it("rejects a draft when the property is paused after link resolution", async () => {
     const gate = blockApplicationWrite("draft");
     const draft = context.app.inject({ method: "PUT", url: "/api/v1/tenant/application-drafts/by-link/valid-chamberi-public-link", headers: { cookie: cookies.tenantA }, payload: { fullName: "Lucía Martín" } });
@@ -623,6 +671,15 @@ describe("authenticated tenant submission", () => {
     expect(records[0]?.agencyId).toBe(ids.agencyA);
     expect(records[0]?.propertyId).toBe(ids.propertyA);
     expect(records[0]?.responsibleUserId).toBeNull();
+    expect(records[0]).toMatchObject({
+      phone: completeApplication.phone,
+      individualNetMonthlyIncomeCents: completeApplication.individualNetMonthlyIncomeCents,
+      householdNetMonthlyIncomeCents: completeApplication.householdNetMonthlyIncomeCents,
+      adultOccupants: completeApplication.adultOccupants,
+      minorOccupants: completeApplication.minorOccupants,
+      intendedMoveInDate: completeApplication.intendedMoveInDate,
+      draftData: completeApplication,
+    });
     expect(context.emailProvider.messages.filter((message) => message.template === "application_received")).toHaveLength(1);
     const agencyNotifications = context.emailProvider.messages.filter((message) => message.template === "new_applicant");
     expect(agencyNotifications).toHaveLength(1);
@@ -667,18 +724,69 @@ describe("authenticated tenant submission", () => {
 });
 
 describe("agency applicant workspace", () => {
-  beforeEach(async () => {
-    const submittedAt = new Date("2026-08-08T10:30:00.000Z");
-    await context.db.insert(applications).values({ id: ids.applicationA, agencyId: ids.agencyA, propertyId: ids.propertyA, tenantUserId: ids.tenantA, responsibleUserId: ids.adminA, status: "new", documentState: "missing", submittedAt, draftData: completeApplication, consentVersion: "v1", consentedAt: submittedAt, sourceLinkTokenHash: hashSecret("valid-chamberi-public-link"), createdAt: submittedAt, updatedAt: submittedAt });
+  it("flags same-property normalized phone matches without merging or changing either application", async () => {
+    const submittedAt = new Date("2026-08-08T12:00:00.000Z");
+    const secondId = "70000000-0000-4000-8000-000000000099";
+    await context.db.update(applications).set({ normalizedPhone: "34612144309", normalizedEmail: "lucia@example.es" }).where(eq(applications.id, ids.applicationA));
+    await context.db.insert(applications).values({ id: secondId, agencyId: ids.agencyA, propertyId: ids.propertyA, tenantUserId: ids.tenantB, status: "new", documentState: "not_requested", submittedAt, phone: "+34612144309", normalizedPhone: "34612144309", normalizedEmail: "other@example.es", draftData: { ...completeApplication, fullName: "Otro Inquilino", email: "other@example.es" }, createdAt: submittedAt, updatedAt: submittedAt });
+    const list = await context.app.inject({ method: "GET", url: `/api/v1/agency/properties/${ids.propertyA}/applications`, headers: { cookie: cookies.adminA } });
+    expect(list.statusCode).toBe(200);
+    const items = list.json().data.applications as Array<{ application: { id: string }; possibleDuplicate: { matchedOn: string[]; applicationIds: string[] } | null }>;
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.possibleDuplicate)).toEqual(expect.arrayContaining([
+      { matchedOn: ["phone"], applicationIds: [secondId] },
+      { matchedOn: ["phone"], applicationIds: [ids.applicationA] },
+    ]));
+    expect(items.map((item) => item.application.id).sort()).toEqual([ids.applicationA, secondId].sort());
   });
 
-  it("returns a tenant-scoped application summary that matches the explicit OpenAPI contract", async () => {
+  it("paginates properties, applicants, and appointments with stable metadata", async () => {
+    const createdAt = new Date("2026-08-08T12:00:00.000Z");
+    const tenantId = "30000000-0000-4000-8000-000000000099";
+    const propertyId = "50000000-0000-4000-8000-000000000099";
+    const applicationId = "70000000-0000-4000-8000-000000000099";
+    await context.db.insert(users).values({ id: tenantId, kind: "tenant", email: "pagination@example.es", fullName: "Ana Paginada", passwordHash: await argon2.hash("test-password"), emailVerifiedAt: createdAt, createdAt, updatedAt: createdAt });
+    await context.db.insert(properties).values({ id: propertyId, agencyId: ids.agencyA, internalReference: "MAD-PAGE", title: "Piso paginado", city: "Madrid", province: "Madrid", monthlyRentCents: 110_000, createdAt, updatedAt: createdAt });
+    await context.db.insert(applications).values({ id: applicationId, agencyId: ids.agencyA, propertyId: ids.propertyA, tenantUserId: tenantId, submittedAt: createdAt, phone: "+34600000099", householdNetMonthlyIncomeCents: 500_000, draftData: { phone: "+34600000099", householdNetMonthlyIncomeCents: 500_000 }, createdAt, updatedAt: createdAt });
+    await context.db.insert(appointments).values([
+      { id: "90000000-0000-4000-8000-000000000098", agencyId: ids.agencyA, propertyId: ids.propertyA, applicationId: ids.applicationA, startsAt: new Date("2098-08-10T10:00:00.000Z"), durationMinutes: 30, createdAt, updatedAt: createdAt },
+      { id: "90000000-0000-4000-8000-000000000099", agencyId: ids.agencyA, propertyId: ids.propertyA, applicationId, startsAt: new Date("2098-08-11T10:00:00.000Z"), durationMinutes: 30, createdAt, updatedAt: createdAt },
+    ]);
+
+    for (const url of [
+      "/api/v1/agency/properties?page=1&pageSize=1",
+      `/api/v1/agency/properties/${ids.propertyA}/applications?page=1&pageSize=1`,
+      "/api/v1/agency/appointments?page=1&pageSize=1",
+    ]) {
+      const first = await context.app.inject({ method: "GET", url, headers: { cookie: cookies.adminA } });
+      expect(first.statusCode).toBe(200);
+      expect(first.json().data.pagination).toEqual({ page: 1, pageSize: 1, total: 2, totalPages: 2, hasMore: true });
+      const second = await context.app.inject({ method: "GET", url: url.replace("page=1", "page=2"), headers: { cookie: cookies.adminA } });
+      expect(second.statusCode).toBe(200);
+      expect(second.json().data.pagination).toEqual({ page: 2, pageSize: 1, total: 2, totalPages: 2, hasMore: false });
+    }
+
+    const phoneSearch = await context.app.inject({ method: "GET", url: `/api/v1/agency/properties/${ids.propertyA}/applications?search=%2B34600000099`, headers: { cookie: cookies.adminA } });
+    expect(phoneSearch.json().data.applications).toEqual([expect.objectContaining({ application: expect.objectContaining({ id: applicationId }) })]);
+    const incomeSort = await context.app.inject({ method: "GET", url: `/api/v1/agency/properties/${ids.propertyA}/applications?sort=income`, headers: { cookie: cookies.adminA } });
+    expect(incomeSort.json().data.applications[0].application.id).toBe(applicationId);
+    const recentOnly = await context.app.inject({ method: "GET", url: "/api/v1/agency/properties?hasRecentNewApplicants=true&pageSize=1", headers: { cookie: cookies.adminA } });
+    expect(recentOnly.json().data).toMatchObject({ properties: [expect.objectContaining({ property: expect.objectContaining({ id: ids.propertyA }) })], pagination: { total: 1, hasMore: false } });
+  });
+
+  beforeEach(async () => {
+    const submittedAt = new Date("2026-08-08T10:30:00.000Z");
+    await context.db.insert(applications).values({ id: ids.applicationA, agencyId: ids.agencyA, propertyId: ids.propertyA, tenantUserId: ids.tenantA, responsibleUserId: ids.adminA, status: "new", documentState: "missing", submittedAt, draftData: completeApplication, phone: completeApplication.phone, individualNetMonthlyIncomeCents: completeApplication.individualNetMonthlyIncomeCents, householdNetMonthlyIncomeCents: completeApplication.householdNetMonthlyIncomeCents, adultOccupants: completeApplication.adultOccupants, minorOccupants: completeApplication.minorOccupants, intendedMoveInDate: completeApplication.intendedMoveInDate, consentVersion: "v1", consentedAt: submittedAt, sourceLinkTokenHash: hashSecret("valid-chamberi-public-link"), createdAt: submittedAt, updatedAt: submittedAt });
+  });
+
+  it("returns tenant-scoped summaries and details that match the explicit OpenAPI contract", async () => {
     const response = await context.app.inject({ method: "GET", url: "/api/v1/tenant/applications", headers: { cookie: cookies.tenantA } });
     expect(response.statusCode).toBe(200);
     const item = response.json().data.applications[0];
     expect(item).toMatchObject({
       application: { id: ids.applicationA, status: "new", documentState: "missing", submittedAt: expect.any(String), updatedAt: expect.any(String) },
       property: { id: ids.propertyA, title: "Piso luminoso en Chamberí", publicLocation: "Trafalgar, Madrid", coverImageUrl: null },
+      resumePath: null,
     });
     expect(Object.keys(item.application).sort()).toEqual(["documentState", "id", "status", "submittedAt", "updatedAt"]);
     expect(Object.keys(item.property).sort()).toEqual(["coverImageUrl", "id", "publicLocation", "title"]);
@@ -695,6 +803,29 @@ describe("agency applicant workspace", () => {
     for (const key of itemSchema.properties.property.required) expect(item.property).toHaveProperty(key);
     expect(itemSchema.properties.application.properties.status.enum).toContain(item.application.status);
     expect(itemSchema.properties.application.properties.documentState.enum).toContain(item.application.documentState);
+
+    const detail = await context.app.inject({ method: "GET", url: `/api/v1/tenant/applications/${ids.applicationA}`, headers: { cookie: cookies.tenantA } });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().data).toMatchObject({
+      application: { id: ids.applicationA, status: "new", documentState: "missing" },
+      property: { id: ids.propertyA, agencyName: "Albor Inmobiliaria", internalReference: "MAD-042", title: "Piso luminoso en Chamberí" },
+      documents: [],
+    });
+    expect(detail.json().data.application).not.toHaveProperty("draftData");
+    expect((await context.app.inject({ method: "GET", url: `/api/v1/tenant/applications/${ids.applicationA}`, headers: { cookie: cookies.tenantB } })).statusCode).toBe(404);
+
+    const detailOperation = document.paths["/api/v1/tenant/applications/{applicationId}"].get;
+    expect(Object.keys(detailOperation.responses).sort()).toEqual(["200", "400", "401", "403", "404", "409", "500"]);
+  });
+
+  it("returns a recoverable source link only for an active draft", async () => {
+    await context.db.update(applications).set({ submittedAt: null, consentedAt: null, consentVersion: null }).where(eq(applications.id, ids.applicationA));
+    const active = await context.app.inject({ method: "GET", url: "/api/v1/tenant/applications", headers: { cookie: cookies.tenantA } });
+    expect(active.json().data.applications[0].resumePath).toBe("/solicitud/valid-chamberi-public-link");
+
+    await context.db.update(properties).set({ state: "paused" }).where(eq(properties.id, ids.propertyA));
+    const paused = await context.app.inject({ method: "GET", url: "/api/v1/tenant/applications", headers: { cookie: cookies.tenantA } });
+    expect(paused.json().data.applications[0].resumePath).toBeNull();
   });
 
   it("denies a sensitive applicant read when membership is removed after authentication", async () => {
@@ -1114,6 +1245,13 @@ describe("agency applicant workspace", () => {
     const propertyList = await context.app.inject({ method: "GET", url: "/api/v1/agency/properties", headers: { cookie: cookies.adminA } });
     const listedProperty = propertyList.json().data.properties.find((row: { property: { id: string } }) => row.property.id === ids.propertyA);
     expect(listedProperty.nextViewing.id).toBe(first.json().data.appointment.id);
+    expect(listedProperty.nextViewing).not.toHaveProperty("idempotencyKeyHash");
+    expect(listedProperty.nextViewing).not.toHaveProperty("requestFingerprint");
+    const applicantList = await context.app.inject({ method: "GET", url: `/api/v1/agency/properties/${ids.propertyA}/applications`, headers: { cookie: cookies.adminA } });
+    const listedApplicant = applicantList.json().data.applications.find((row: { application: { id: string } }) => row.application.id === ids.applicationA);
+    expect(listedApplicant.nextViewing.id).toBe(first.json().data.appointment.id);
+    expect(listedApplicant.nextViewing).not.toHaveProperty("idempotencyKeyHash");
+    expect(listedApplicant.nextViewing).not.toHaveProperty("requestFingerprint");
     const second = await context.app.inject({ method: "POST", url: "/api/v1/agency/appointments", headers: { cookie: cookies.adminA, "idempotency-key": "appointment-create-0002" }, payload: { ...payload, startsAt: "2098-08-10T18:15:00+02:00" } });
     expect(second.statusCode).toBe(201);
     expect(second.json().data.warnings[0].code).toBe("RESPONSIBLE_USER_OVERLAP");

@@ -39,6 +39,26 @@
 
 .public-application__skip:focus { transform: translateY(0); }
 
+.public-application__loading {
+  width: 46px;
+  height: 10px;
+  margin: 0 auto 18px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--pa-border) 0 30%, var(--pa-coral) 30% 60%, var(--pa-border) 60% 100%);
+  background-size: 220% 100%;
+  animation: public-application-loading 1.1s ease-in-out infinite;
+}
+
+.public-application__account-terms { color: var(--pa-muted); font-size: 13px; }
+.public-application__account-terms a { color: var(--pa-text); font-weight: 700; }
+.public-application__saved.is-error { color: var(--pa-error); }
+
+@keyframes public-application-loading { to { background-position: -220% 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .public-application__loading { animation: none; }
+}
+
 .public-application__header {
   display: flex;
   align-items: center;
@@ -371,6 +391,11 @@
 .public-application__field-error { margin: 0; color: var(--pa-error); font-size: 12px; font-weight: 650; }
 
 .public-application__fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.public-application__adult-card { display: grid; gap: 12px; min-width: 0; margin: 4px 0; border: 1px solid var(--pa-border); border-radius: 12px; background: #fbfaf7; padding: 16px; }
+.public-application__adult-card legend { padding: 0 6px; color: var(--pa-text); font-weight: 800; }
+.public-application__adult-card > p { margin: 0; color: var(--pa-muted); font-size: 12px; }
+.public-application__adult-documents { display: grid; gap: 10px; border-top: 1px solid var(--pa-border); padding-top: 14px; }
+.public-application__adult-documents h3 { margin: 0; font-size: 16px; }
 .public-application__fieldset legend { margin-bottom: 9px; color: var(--pa-text); font-size: 13px; font-weight: 700; }
 .public-application__choice-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .public-application__choice input { position: absolute; opacity: 0; pointer-events: none; }

@@ -65,6 +65,16 @@ const demoApplication = (input: { phone: string; adults: number; minors: number;
   individualNetMonthlyIncomeCents: input.income, householdNetMonthlyIncomeCents: input.income,
   guarantorAvailability: "unsure", viewingAvailability: ["Tardes entre semana"], availabilityNote: "A partir de las 18:00", marketingConsent: false,
 });
+const submittedFields = (draft: ReturnType<typeof demoApplication>) => ({
+  draftData: draft,
+  phone: draft.phone,
+  individualNetMonthlyIncomeCents: draft.individualNetMonthlyIncomeCents,
+  householdNetMonthlyIncomeCents: draft.householdNetMonthlyIncomeCents,
+  adultOccupants: draft.adultOccupants,
+  minorOccupants: draft.minorOccupants,
+  intendedMoveInDate: draft.intendedMoveInDate,
+  applicationDataPromotedAt: now,
+});
 
 try {
   await database.db.insert(users).values([
@@ -129,6 +139,8 @@ try {
     {
       id: IDS.application, agencyId: IDS.agency, propertyId: IDS.property, tenantUserId: IDS.tenant, responsibleUserId: null,
       status: "new", documentState: "missing", submittedAt: now,
+      phone: "+34600000000", individualNetMonthlyIncomeCents: 240_000, householdNetMonthlyIncomeCents: 390_000,
+      adultOccupants: 2, minorOccupants: 0, intendedMoveInDate: "2026-09-01", applicationDataPromotedAt: now,
       draftData: {
         fullName: "Lucía Martín", email: "inquilino@inquilink.es", phone: "+34600000000", preferredContactChannel: "whatsapp",
         adultOccupants: 2, minorOccupants: 0, intendedMoveInDate: "2026-09-01", pets: "no", petDetails: null,
@@ -143,40 +155,40 @@ try {
     {
       id: IDS.applicationAndres, agencyId: IDS.agency, propertyId: IDS.property, tenantUserId: IDS.tenantAndres, responsibleUserId: null,
       status: "new", documentState: "missing", submittedAt: daysFromNow(-1, 8, 16),
-      draftData: demoApplication({ phone: "+34680776211", adults: 1, minors: 0, income: 335_000, employment: "Autónomo", employer: "Arquitectura AR", message: "Trabajo desde casa y busco una vivienda estable." }),
+      ...submittedFields(demoApplication({ phone: "+34680776211", adults: 1, minors: 0, income: 335_000, employment: "Autónomo", employer: "Arquitectura AR", message: "Trabajo desde casa y busco una vivienda estable." })),
       consentVersion: "prototype-v1", consentedAt: daysFromNow(-1, 8, 16), sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.property), createdAt: daysFromNow(-1, 8, 16), updatedAt: now,
     },
     {
       id: IDS.applicationSamuel, agencyId: IDS.agency, propertyId: IDS.property, tenantUserId: IDS.tenantSamuel, responsibleUserId: null,
       status: "new", documentState: "complete", submittedAt: daysFromNow(-4),
-      draftData: demoApplication({ phone: "+34622994871", adults: 1, minors: 0, income: 260_000, employment: "Cuenta ajena", employer: "Brava Foods", message: "Puedo aportar avalista si es necesario." }),
+      ...submittedFields(demoApplication({ phone: "+34622994871", adults: 1, minors: 0, income: 260_000, employment: "Cuenta ajena", employer: "Brava Foods", message: "Puedo aportar avalista si es necesario." })),
       consentVersion: "prototype-v1", consentedAt: daysFromNow(-4), sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.property), createdAt: daysFromNow(-4), updatedAt: now,
     },
     {
       id: IDS.applicationMiguel, agencyId: IDS.agency, propertyId: IDS.property, tenantUserId: IDS.tenantMiguel,
       status: "new", documentState: "not_requested", submittedAt: daysFromNow(-6),
-      draftData: demoApplication({ phone: "+34673990512", adults: 1, minors: 0, income: 0, employment: "Estudiante", employer: "IE University", message: "Mi padre sería el avalista de la operación." }),
+      ...submittedFields(demoApplication({ phone: "+34673990512", adults: 1, minors: 0, income: 0, employment: "Estudiante", employer: "IE University", message: "Mi padre sería el avalista de la operación." })),
       consentVersion: "prototype-v1", consentedAt: daysFromNow(-6), sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.property), createdAt: daysFromNow(-6), updatedAt: now,
     },
     {
       id: IDS.applicationElena, agencyId: IDS.agency, propertyId: IDS.property, tenantUserId: IDS.tenantElena, responsibleUserId: null,
       status: "preselected", documentState: "complete", submittedAt: daysFromNow(-3),
-      draftData: demoApplication({ phone: "+34655610428", adults: 2, minors: 1, income: 510_000, employment: "Cuenta ajena", employer: "Hospital La Paz", message: "Nos interesa especialmente la cercanía al colegio." }),
+      ...submittedFields(demoApplication({ phone: "+34655610428", adults: 2, minors: 1, income: 510_000, employment: "Cuenta ajena", employer: "Hospital La Paz", message: "Nos interesa especialmente la cercanía al colegio." })),
       consentVersion: "prototype-v1", consentedAt: daysFromNow(-3), sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.property), createdAt: daysFromNow(-3), updatedAt: now,
     },
     {
       id: IDS.applicationNora, agencyId: IDS.agency, propertyId: IDS.property, tenantUserId: IDS.tenantNora, responsibleUserId: null,
       status: "preselected", documentState: "missing", submittedAt: daysFromNow(-5),
-      draftData: demoApplication({ phone: "+34630127449", adults: 2, minors: 0, income: 475_000, employment: "Cuenta ajena", employer: "Lumen Tech", message: "La vivienda encaja con lo que buscamos." }),
+      ...submittedFields(demoApplication({ phone: "+34630127449", adults: 2, minors: 0, income: 475_000, employment: "Cuenta ajena", employer: "Lumen Tech", message: "La vivienda encaja con lo que buscamos." })),
       consentVersion: "prototype-v1", consentedAt: daysFromNow(-5), sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.property), createdAt: daysFromNow(-5), updatedAt: now,
     },
     {
       id: IDS.applicationMarina, agencyId: IDS.agency, propertyId: IDS.propertyRetiro, tenantUserId: IDS.tenantMarina, responsibleUserId: null,
       status: "new", documentState: "complete", submittedAt: daysFromNow(-1, 10, 5),
-      draftData: demoApplication({ phone: "+34611478120", adults: 2, minors: 0, income: 590_000, employment: "Cuenta ajena", employer: "Kiro Labs", message: "La terraza es justo lo que estábamos buscando." }),
+      ...submittedFields(demoApplication({ phone: "+34611478120", adults: 2, minors: 0, income: 590_000, employment: "Cuenta ajena", employer: "Kiro Labs", message: "La terraza es justo lo que estábamos buscando." })),
       consentVersion: "prototype-v1", consentedAt: daysFromNow(-1, 10, 5), sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.propertyRetiro), createdAt: daysFromNow(-1, 10, 5), updatedAt: now,
     },
-    { id: IDS.otherApplication, agencyId: IDS.otherAgency, propertyId: IDS.otherProperty, tenantUserId: IDS.otherTenant, status: "new", documentState: "missing", submittedAt: now, draftData: { phone: "+34600000001" }, consentVersion: "prototype-v1", consentedAt: now, sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.otherProperty), createdAt: now, updatedAt: now },
+    { id: IDS.otherApplication, agencyId: IDS.otherAgency, propertyId: IDS.otherProperty, tenantUserId: IDS.otherTenant, status: "new", documentState: "missing", submittedAt: now, phone: "+34600000001", applicationDataPromotedAt: now, draftData: { phone: "+34600000001" }, consentVersion: "prototype-v1", consentedAt: now, sourceLinkTokenHash: hashSecret(PUBLIC_LINKS.otherProperty), createdAt: now, updatedAt: now },
   ]).onConflictDoNothing();
   await database.db.insert(appointments).values([
     { id: IDS.appointmentLucia, agencyId: IDS.agency, propertyId: IDS.property, applicationId: IDS.application, responsibleUserId: IDS.agencyAdmin, startsAt: daysFromNow(1, 16), durationMinutes: 30, state: "scheduled", instructions: "Portal principal. Preguntar por Pablo.", internalNote: "Llevar ficha impresa.", createdAt: now, updatedAt: now },

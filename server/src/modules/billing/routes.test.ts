@@ -1,10 +1,10 @@
 import argon2 from "argon2";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { agencies, agencyClosureCleanup, agencyMemberships, billingOperations, emailOutbox, invoices, sessions, subscriptions, users } from "../../db/schema.js";
+import { agencies, agencyClosureCleanup, agencyMemberships, billingOperations, emailOutbox, invoices, properties, sessions, subscriptions, users } from "../../db/schema.js";
 import { hashSecret, newId } from "../../lib/ids.js";
 import { createTestApp } from "../../test/test-app.js";
-import { BillingProviderError, type BillingProvider, type BillingProviderSubscriptionSnapshot, type CreatedSubscription } from "./provider.js";
+import { BillingProviderError, type BillingFiscalProfile, type BillingProvider, type BillingProviderSubscriptionSnapshot, type CreatedSubscription } from "./provider.js";
 import { reconcileAgencyClosures } from "./closure.js";
 import { syncBillingProviderState } from "./sync.js";
 import { enqueueScheduledNotifications } from "../email/scheduler.js";
@@ -22,7 +22,7 @@ async function seedAgency(): Promise<void> {
     { id: adminId, kind: "agency", email: "admin@example.es", fullName: "Admin", passwordHash, emailVerifiedAt: now, createdAt: now, updatedAt: now },
     { id: collaboratorId, kind: "agency", email: "colaborador@example.es", fullName: "Colaborador", passwordHash, emailVerifiedAt: now, createdAt: now, updatedAt: now },
   ]);
-  await context.db.insert(agencies).values({ id: agencyId, name: "Agency", createdAt: now, updatedAt: now });
+  await context.db.insert(agencies).values({ id: agencyId, name: "Agency", fiscalId: "B12345678", billingName: "Agency SL", billingAddress: "Calle Mayor 1, Madrid", createdAt: now, updatedAt: now });
   await context.db.insert(agencyMemberships).values([
     { agencyId, userId: adminId, role: "admin", createdAt: now },
     { agencyId, userId: collaboratorId, role: "collaborator", createdAt: now },
@@ -40,6 +40,64 @@ beforeEach(async () => {
 afterEach(async () => context.close());
 
 describe("billing safety", () => {
+  it("stores normalized Spanish fiscal data and exposes it only to administrators", async () => {
+    const denied = await context.app.inject({ method: "PATCH", url: "/api/v1/billing/fiscal-profile", headers: { cookie: "inquilink_session=collaborator-token", "idempotency-key": "fiscal-denied-0001" }, payload: { fiscalId: "B-12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, 28013 Madrid" } });
+    expect(denied.statusCode).toBe(403);
+    const updated = await context.app.inject({ method: "PATCH", url: "/api/v1/billing/fiscal-profile", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "fiscal-local-0001" }, payload: { fiscalId: "B-12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, 28013 Madrid" } });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().data.fiscalProfile).toEqual({ fiscalId: "B12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, 28013 Madrid" });
+    const status = await context.app.inject({ method: "GET", url: "/api/v1/billing/status", headers: { cookie: "inquilink_session=admin-token" } });
+    expect(status.json().data.fiscalProfile).toEqual(updated.json().data.fiscalProfile);
+  });
+
+  it("sends fiscal data on trial creation and synchronizes later updates idempotently", async () => {
+    await context.close();
+    const provider = new ControlledBillingProvider();
+    context = await createTestApp({}, undefined, { billingProvider: provider });
+    await seedAgency();
+    const trial = await context.app.inject({ method: "POST", url: "/api/v1/billing/trial", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "trial-with-fiscal-0001" }, payload: { plan: "professional", paymentMethodToken: "pm_fiscal" } });
+    expect(trial.statusCode).toBe(201);
+    expect(provider.trialFiscalProfiles).toEqual([{ fiscalId: "B12345678", billingName: "Agency SL", billingAddress: "Calle Mayor 1, Madrid" }]);
+    const request = { method: "PATCH" as const, url: "/api/v1/billing/fiscal-profile", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "fiscal-provider-update-0001" }, payload: { fiscalId: "B-87654321", billingName: "Agency Nueva SL", billingAddress: "Gran Vía 2, Madrid" } };
+    const updated = await context.app.inject(request);
+    expect(updated.statusCode).toBe(200);
+    expect(provider.fiscalUpdates).toEqual([{ customerRef: "customer_test", fiscalProfile: { fiscalId: "B87654321", billingName: "Agency Nueva SL", billingAddress: "Gran Vía 2, Madrid" }, idempotencyKey: expect.stringMatching(/^billing-operation:/) }]);
+    const replay = await context.app.inject(request);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.headers["idempotency-replayed"]).toBe("true");
+    expect(provider.fiscalUpdates).toHaveLength(1);
+  });
+
+  it("keeps the prior fiscal profile after an ambiguous provider result and retries with the same durable key", async () => {
+    await context.close();
+    const provider = new ControlledBillingProvider();
+    context = await createTestApp({}, undefined, { billingProvider: provider });
+    await seedAgency();
+    expect((await context.app.inject({ method: "POST", url: "/api/v1/billing/trial", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "trial-before-fiscal-retry" }, payload: { plan: "professional", paymentMethodToken: "pm_fiscal_retry" } })).statusCode).toBe(201);
+    provider.fiscalFailOnce = true;
+    const request = { method: "PATCH" as const, url: "/api/v1/billing/fiscal-profile", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "fiscal-ambiguous-retry-1" }, payload: { fiscalId: "B-87654321", billingName: "Agency Retry SL", billingAddress: "Gran Vía 3, Madrid" } };
+    expect((await context.app.inject(request)).statusCode).toBe(503);
+    expect((await context.db.select().from(agencies).where(eq(agencies.id, agencyId)))[0]).toMatchObject({ fiscalId: "B12345678", billingName: "Agency SL" });
+    expect((await context.app.inject(request)).statusCode).toBe(200);
+    expect(provider.fiscalUpdates).toHaveLength(2);
+    expect(new Set(provider.fiscalUpdates.map((call) => call.idempotencyKey)).size).toBe(1);
+    expect((await context.db.select().from(agencies).where(eq(agencies.id, agencyId)))[0]).toMatchObject({ fiscalId: "B87654321", billingName: "Agency Retry SL" });
+  });
+
+  it("releases a definitively rejected fiscal update so corrected data can be synchronized", async () => {
+    await context.close();
+    const provider = new ControlledBillingProvider();
+    context = await createTestApp({}, undefined, { billingProvider: provider });
+    await seedAgency();
+    expect((await context.app.inject({ method: "POST", url: "/api/v1/billing/trial", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "trial-before-fiscal-decline" }, payload: { plan: "professional", paymentMethodToken: "pm_fiscal_decline" } })).statusCode).toBe(201);
+    provider.fiscalDeclineOnce = true;
+    const base = { method: "PATCH" as const, url: "/api/v1/billing/fiscal-profile", headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "fiscal-declined-0001" }, payload: { fiscalId: "B-87654321", billingName: "Agency Corrected SL", billingAddress: "Gran Vía 4, Madrid" } };
+    expect((await context.app.inject(base)).statusCode).toBe(422);
+    const corrected = await context.app.inject({ ...base, headers: { ...base.headers, "idempotency-key": "fiscal-corrected-0002" } });
+    expect(corrected.statusCode).toBe(200);
+    expect((await context.db.select().from(subscriptions))[0]?.pendingBillingOperationId).toBeNull();
+  });
+
   it("keeps the provider-authoritative trial end across a delayed response, status, and reminders", async () => {
     await context.close();
     const activationAt = new Date("2026-08-08T10:00:00.000Z");
@@ -150,7 +208,7 @@ describe("billing safety", () => {
     const secondAdminId = "11111111-1111-4111-8111-111111111152";
     const createdAt = new Date();
     await context.db.insert(users).values({ id: secondAdminId, kind: "agency", email: "second@example.es", fullName: "Second", passwordHash: "test", emailVerifiedAt: createdAt, createdAt, updatedAt: createdAt });
-    await context.db.insert(agencies).values({ id: secondAgencyId, name: "Second Agency", createdAt, updatedAt: createdAt });
+    await context.db.insert(agencies).values({ id: secondAgencyId, name: "Second Agency", fiscalId: "B87654321", billingName: "Second Agency SL", billingAddress: "Calle Segunda 2, Madrid", createdAt, updatedAt: createdAt });
     await context.db.insert(agencyMemberships).values({ agencyId: secondAgencyId, userId: secondAdminId, role: "admin", createdAt });
     await context.db.insert(sessions).values({ id: newId(), userId: secondAdminId, tokenHash: hashSecret("second-token"), createdAt, lastSeenAt: createdAt, expiresAt: new Date(createdAt.getTime() + 86_400_000) });
     for (const token of ["admin-token", "second-token"]) {
@@ -456,6 +514,81 @@ describe("billing safety", () => {
     expect((await context.db.select().from(subscriptions))[0]).toMatchObject({ cancelAtPeriodEnd: true, pendingBillingOperationId: null });
     expect((await context.db.select().from(billingOperations))[0]).toMatchObject({ state: "completed", providerAppliedAt: markerAt, attempts: 1, lastErrorCode: null });
   });
+
+  it("changes plan idempotently and rejects a downgrade that cannot hold current usage", async () => {
+    await context.close();
+    const provider = new ControlledBillingProvider();
+    context = await createTestApp({}, undefined, { billingProvider: provider });
+    await seedAgency();
+    await insertSubscription(false);
+
+    const upgraded = await context.app.inject({
+      method: "PATCH", url: "/api/v1/billing/plan",
+      headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "change-plan-upgrade-0001" },
+      payload: { plan: "inmobiliaria" },
+    });
+    expect(upgraded.statusCode).toBe(200);
+    expect(upgraded.json().data).toEqual({ previousPlan: "professional", plan: "inmobiliaria", priceCents: 9_999, currency: "EUR" });
+    expect((await context.db.select().from(subscriptions))[0]).toMatchObject({ plan: "inmobiliaria", pendingBillingOperationId: null });
+    expect(provider.planChanges).toEqual([{ plan: "inmobiliaria", idempotencyKey: expect.stringMatching(/^billing-operation:/) }]);
+
+    const replay = await context.app.inject({
+      method: "PATCH", url: "/api/v1/billing/plan",
+      headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "change-plan-upgrade-0001" },
+      payload: { plan: "inmobiliaria" },
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.headers["idempotency-replayed"]).toBe("true");
+    expect(provider.planChanges).toHaveLength(1);
+
+    const createdAt = new Date();
+    await context.db.insert(properties).values(Array.from({ length: 3 }, (_, index) => ({
+      id: `11111111-1111-4111-8111-1111111112${index + 5}`,
+      agencyId, internalReference: `DOWN-${index}`, title: `Piso ${index}`, address: "Calle Mayor 1", city: "Madrid", province: "Madrid", postalCode: "28001",
+      propertyType: "Piso", bedrooms: 1, bathrooms: 1, floorAreaSqm: 40, availableFrom: "2026-09-01", description: "Descripción", publicLocation: "Madrid",
+      monthlyRentCents: 100_000, state: "published" as const, createdAt, updatedAt: createdAt,
+    })));
+    const downgrade = await context.app.inject({
+      method: "PATCH", url: "/api/v1/billing/plan",
+      headers: { cookie: "inquilink_session=admin-token", "idempotency-key": "change-plan-downgrade-001" },
+      payload: { plan: "particular" },
+    });
+    expect(downgrade.statusCode).toBe(409);
+    expect(downgrade.json().error).toMatchObject({ code: "PLAN_DOWNGRADE_LIMIT_EXCEEDED", details: { usage: { listings: 3 }, limits: { listings: 2 } } });
+    expect((await context.db.select().from(subscriptions))[0]?.plan).toBe("inmobiliaria");
+    expect(provider.planChanges).toHaveLength(1);
+
+    const denied = await context.app.inject({
+      method: "PATCH", url: "/api/v1/billing/plan",
+      headers: { cookie: "inquilink_session=collaborator-token", "idempotency-key": "change-plan-denied-00001" },
+      payload: { plan: "professional" },
+    });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it("blocks capacity increases while a downgrade is waiting for the provider", async () => {
+    await insertSubscription(false);
+    const createdAt = new Date();
+    const operationId = newId();
+    await context.db.insert(billingOperations).values({
+      id: operationId, agencyId, operation: "change_plan", idempotencyKeyHash: hashSecret("change-plan-race-00001"),
+      requestFingerprint: hashSecret("particular"), state: "pending", createdAt, updatedAt: createdAt,
+    });
+    await context.db.update(subscriptions).set({ pendingBillingOperationId: operationId }).where(eq(subscriptions.agencyId, agencyId));
+    await context.db.insert(properties).values(Array.from({ length: 3 }, (_, index) => ({
+      id: `11111111-1111-4111-8111-11111111113${index + 1}`,
+      agencyId, internalReference: `RACE-${index}`, title: `Piso ${index}`, address: "Calle Mayor 1", city: "Madrid", province: "Madrid", postalCode: "28001",
+      propertyType: "Piso", bedrooms: 1, bathrooms: 1, floorAreaSqm: 40, availableFrom: "2026-09-01", description: "Descripción", publicLocation: "Madrid",
+      monthlyRentCents: 100_000, state: index < 2 ? "published" as const : "draft" as const, createdAt, updatedAt: createdAt,
+    })));
+
+    const publish = await context.app.inject({
+      method: "POST", url: "/api/v1/agency/properties/11111111-1111-4111-8111-111111111133/publish",
+      headers: { cookie: "inquilink_session=collaborator-token", "idempotency-key": "publish-during-downgrade-1" }, payload: { expectedVersion: 1 },
+    });
+    expect(publish.statusCode).toBe(409);
+    expect(publish.json().error.code).toBe("BILLING_TRANSITION_IN_PROGRESS");
+  });
 });
 
 class ControlledBillingProvider implements BillingProvider {
@@ -483,11 +616,17 @@ class ControlledBillingProvider implements BillingProvider {
   releaseSyncResolve!: () => void;
   readonly releaseSync = new Promise<void>((resolve) => { this.releaseSyncResolve = resolve; });
   trialKeys: string[] = [];
+  trialFiscalProfiles: BillingFiscalProfile[] = [];
+  fiscalUpdates: Array<{ customerRef: string; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }> = [];
+  fiscalFailOnce = false;
+  fiscalDeclineOnce = false;
   paymentKeys: string[] = [];
+  planChanges: Array<{ plan: "particular" | "professional" | "inmobiliaria"; idempotencyKey: string }> = [];
   authoritativeTrialEndsAt = new Date("2026-09-07T10:00:00.000Z");
-  async createTrial(input: { agencyId: string; plan: "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; idempotencyKey: string }): Promise<CreatedSubscription> {
+  async createTrial(input: { agencyId: string; plan: "professional" | "inmobiliaria"; paymentMethodToken: string; activationRequestedAt: Date; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<CreatedSubscription> {
     this.trialCalls += 1;
     this.trialKeys.push(input.idempotencyKey);
+    this.trialFiscalProfiles.push(input.fiscalProfile);
     this.trialStartedResolve();
     if (this.trialBarrier) await this.trialBarrier;
     if (this.trialAcceptThenTimeout && !this.acceptedTrialKeys.has(input.idempotencyKey)) {
@@ -496,6 +635,11 @@ class ControlledBillingProvider implements BillingProvider {
     }
     if (this.trialError) throw this.trialError;
     return { customerRef: "customer_test", subscriptionRef: "subscription_test", paymentMethodDisplay: "Tarjeta terminada en 4242", trialEndsAt: this.authoritativeTrialEndsAt };
+  }
+  async updateCustomerFiscalProfile(input: { customerRef: string; fiscalProfile: BillingFiscalProfile; idempotencyKey: string }): Promise<void> {
+    this.fiscalUpdates.push(input);
+    if (this.fiscalFailOnce) { this.fiscalFailOnce = false; throw new BillingProviderError("unavailable"); }
+    if (this.fiscalDeclineOnce) { this.fiscalDeclineOnce = false; throw new BillingProviderError("declined"); }
   }
   async cancel(input: { subscriptionRef: string; idempotencyKey: string }): Promise<void> {
     this.cancelKeys.push(input.idempotencyKey);
@@ -512,6 +656,9 @@ class ControlledBillingProvider implements BillingProvider {
   async updatePaymentMethod(input: { customerRef: string; paymentMethodToken: string; idempotencyKey: string }): Promise<{ paymentMethodDisplay: string }> {
     this.paymentKeys.push(input.idempotencyKey);
     return { paymentMethodDisplay: this.paymentDisplay };
+  }
+  async changePlan(input: { subscriptionRef: string; plan: "particular" | "professional" | "inmobiliaria"; idempotencyKey: string }): Promise<void> {
+    this.planChanges.push({ plan: input.plan, idempotencyKey: input.idempotencyKey });
   }
   async syncSubscription(): Promise<BillingProviderSubscriptionSnapshot | null> {
     this.syncStartedResolve();

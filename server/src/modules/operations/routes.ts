@@ -29,6 +29,15 @@ const invitationParams = z.object({ invitationId: z.string().uuid() });
 const roleInput = z.object({ role: z.enum(["admin", "collaborator"]) }).strict();
 const dashboardTrendQuery = z.object({ range: z.enum(["7d", "30d", "90d"]).default("30d") });
 const dashboardTrendDays = { "7d": 7, "30d": 30, "90d": 90 } as const;
+const paginationQuery = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+function pagination(page: number, pageSize: number, total: number) {
+  const totalPages = Math.ceil(total / pageSize);
+  return { page, pageSize, total, totalPages, hasMore: page < totalPages };
+}
 
 const bodySchema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object", additionalProperties: false, ...(required.length ? { required } : {}), properties,
@@ -215,27 +224,36 @@ export function registerOperationalRoutes(app: FastifyInstance, deps: AppDepende
     schema: { tags: ["Equipo"], summary: "Listar el equipo del espacio actual" },
   }, async (request) => {
     const { agency } = requireAgency(request);
+    const query = paginationQuery.parse(request.query);
+    const totalRows = await deps.db.select({ total: count() }).from(agencyMemberships).where(eq(agencyMemberships.agencyId, agency.id));
+    const total = totalRows[0]?.total ?? 0;
     const members = await deps.db.select({
       userId: users.id, fullName: users.fullName, email: users.email,
       role: agencyMemberships.role, joinedAt: agencyMemberships.createdAt,
     }).from(agencyMemberships)
       .innerJoin(users, eq(users.id, agencyMemberships.userId))
       .where(eq(agencyMemberships.agencyId, agency.id))
-      .orderBy(asc(users.fullName));
-    return { data: { members } };
+      .orderBy(asc(users.fullName), asc(users.id))
+      .limit(query.pageSize).offset((query.page - 1) * query.pageSize);
+    return { data: { members, pagination: pagination(query.page, query.pageSize, total) } };
   });
 
   app.get("/api/v1/agency/team/invitations", {
     schema: { tags: ["Equipo"], summary: "Listar invitaciones pendientes" },
   }, async (request) => {
     const { agency } = requireAdmin(request);
+    const query = paginationQuery.parse(request.query);
+    const clauses = and(
+      eq(agencyInvitations.agencyId, agency.id), isNull(agencyInvitations.acceptedAt), isNull(agencyInvitations.revokedAt), gt(agencyInvitations.expiresAt, now()),
+    );
+    const totalRows = await deps.db.select({ total: count() }).from(agencyInvitations).where(clauses);
+    const total = totalRows[0]?.total ?? 0;
     const rows = await deps.db.select({
       id: agencyInvitations.id, email: agencyInvitations.email, role: agencyInvitations.role,
       expiresAt: agencyInvitations.expiresAt, createdAt: agencyInvitations.createdAt,
-    }).from(agencyInvitations).where(and(
-      eq(agencyInvitations.agencyId, agency.id), isNull(agencyInvitations.acceptedAt), isNull(agencyInvitations.revokedAt), gt(agencyInvitations.expiresAt, now()),
-    )).orderBy(desc(agencyInvitations.createdAt));
-    return { data: { invitations: rows } };
+    }).from(agencyInvitations).where(clauses).orderBy(desc(agencyInvitations.createdAt), asc(agencyInvitations.id))
+      .limit(query.pageSize).offset((query.page - 1) * query.pageSize);
+    return { data: { invitations: rows, pagination: pagination(query.page, query.pageSize, total) } };
   });
 
   app.post("/api/v1/agency/team/invitations", {

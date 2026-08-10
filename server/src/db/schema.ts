@@ -58,6 +58,9 @@ export const users = pgTable("users", {
 export const agencies = pgTable("agencies", {
   id: text("id").primaryKey(),
   name: varchar("name", { length: 200 }).notNull(),
+  fiscalId: varchar("fiscal_id", { length: 20 }),
+  billingName: varchar("billing_name", { length: 200 }),
+  billingAddress: text("billing_address"),
   phone: varchar("phone", { length: 40 }),
   contactEmail: varchar("contact_email", { length: 320 }),
   logoUrl: text("logo_url"),
@@ -208,6 +211,26 @@ export const applications = pgTable("applications", {
   status: applicationStatus("status").notNull().default("new"),
   documentState: documentState("document_state").notNull().default("not_requested"),
   submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  phone: varchar("phone", { length: 16 }),
+  normalizedPhone: varchar("normalized_phone", { length: 15 }),
+  normalizedEmail: varchar("normalized_email", { length: 320 }),
+  individualNetMonthlyIncomeCents: integer("individual_net_monthly_income_cents"),
+  householdNetMonthlyIncomeCents: integer("household_net_monthly_income_cents"),
+  adultOccupants: integer("adult_occupants"),
+  minorOccupants: integer("minor_occupants"),
+  intendedMoveInDate: date("intended_move_in_date"),
+  applicationDataPromotedAt: timestamp("application_data_promoted_at", { withTimezone: true }),
+  adultProfiles: jsonb("adult_profiles").$type<Array<{
+    id: string;
+    isPrimary: boolean;
+    fullName: string;
+    email: string | null;
+    phone: string | null;
+    employmentStatus: string;
+    employerOrActivity: string;
+    contractType: string;
+    netMonthlyIncomeCents: number;
+  }>>().notNull().default([]),
   draftData: jsonb("draft_data").$type<Record<string, unknown>>().notNull().default({}),
   consentVersion: varchar("consent_version", { length: 100 }),
   consentedAt: timestamp("consented_at", { withTimezone: true }),
@@ -226,6 +249,10 @@ export const applications = pgTable("applications", {
   uniqueIndex("applications_id_agency_property_unique").on(table.id, table.agencyId, table.propertyId),
   uniqueIndex("applications_graph_unique").on(table.id, table.agencyId, table.propertyId, table.tenantUserId),
   index("applications_agency_property_idx").on(table.agencyId, table.propertyId),
+  index("applications_income_sort_idx").on(table.agencyId, table.propertyId, table.householdNetMonthlyIncomeCents.desc().nullsLast(), table.submittedAt.desc(), table.id.asc()),
+  index("applications_phone_search_idx").using("btree", table.phone.asc().op("varchar_pattern_ops")),
+  index("applications_duplicate_phone_idx").on(table.propertyId, table.normalizedPhone),
+  index("applications_duplicate_email_idx").on(table.propertyId, table.normalizedEmail),
   index("applications_tenant_idx").on(table.tenantUserId),
   uniqueIndex("applications_submission_key_unique").on(table.submissionKeyHash),
   foreignKey({ name: "applications_property_agency_fk", columns: [table.propertyId, table.agencyId], foreignColumns: [properties.id, properties.agencyId] }).onDelete("cascade"),
@@ -252,6 +279,7 @@ export const applicationDocuments = pgTable("application_documents", {
   applicationId: text("application_id").notNull().references(() => applications.id, { onDelete: "cascade" }),
   agencyId: text("agency_id").notNull().references(() => agencies.id, { onDelete: "cascade" }),
   tenantUserId: text("tenant_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  adultProfileId: varchar("adult_profile_id", { length: 50 }).notNull().default("primary"),
   category: varchar("category", { length: 50 }).notNull(),
   storageKey: text("storage_key").notNull(),
   originalName: varchar("original_name", { length: 255 }).notNull(),
@@ -325,6 +353,7 @@ export const appointments = pgTable("appointments", {
   ...timestamps,
 }, (table) => [
   index("appointments_agency_starts_idx").on(table.agencyId, table.startsAt),
+  index("appointments_application_idx").on(table.applicationId),
   uniqueIndex("appointments_agency_idempotency_unique").on(table.agencyId, table.idempotencyKeyHash),
   foreignKey({ name: "appointments_application_graph_fk", columns: [table.applicationId, table.agencyId, table.propertyId], foreignColumns: [applications.id, applications.agencyId, applications.propertyId] }).onDelete("cascade"),
   foreignKey({ name: "appointments_responsible_membership_fk", columns: [table.agencyId, table.responsibleUserId], foreignColumns: [agencyMemberships.agencyId, agencyMemberships.userId] }).onDelete("restrict"),
@@ -393,7 +422,7 @@ export const billingOperations = pgTable("billing_operations", {
   uniqueIndex("billing_operations_idempotency_unique").on(table.agencyId, table.operation, table.idempotencyKeyHash),
   uniqueIndex("billing_operations_id_agency_unique").on(table.id, table.agencyId),
   index("billing_operations_agency_idx").on(table.agencyId),
-  check("billing_operations_operation_check", sql`${table.operation} in ('create_trial', 'update_payment_method', 'cancel', 'reactivate')`),
+  check("billing_operations_operation_check", sql`${table.operation} in ('create_trial', 'update_payment_method', 'update_fiscal_profile', 'change_plan', 'cancel', 'reactivate')`),
   check("billing_operations_state_check", sql`${table.state} in ('pending', 'unknown', 'completed', 'failed', 'abandoned')`),
   check("billing_operations_attempts_check", sql`${table.attempts} >= 0`),
   check("billing_operations_hash_lengths_check", sql`length(${table.idempotencyKeyHash}) = 64 and length(${table.requestFingerprint}) = 64`),
@@ -432,7 +461,11 @@ export const auditEvents = pgTable("audit_events", {
   subjectId: text("subject_id").notNull(),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-}, (table) => [index("audit_agency_created_idx").on(table.agencyId, table.createdAt)]);
+}, (table) => [
+  index("audit_agency_created_idx").on(table.agencyId, table.createdAt),
+  index("audit_application_subject_idx").on(table.agencyId, table.subjectType, table.subjectId, table.createdAt),
+  index("audit_application_metadata_idx").on(table.agencyId, sql`(${table.metadata}->>'applicationId')`, table.createdAt),
+]);
 
 export const emailOutbox = pgTable("email_outbox", {
   id: text("id").primaryKey(),

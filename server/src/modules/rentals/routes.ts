@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { requireAgency, requireTenant, requireUser } from "../../auth/session.js";
@@ -32,14 +32,30 @@ import {
   type DocumentScanner,
   type PrivateDocumentStorage,
 } from "./storage.js";
+import {
+  adultProfilesFromApplication,
+  DOCUMENT_CATEGORIES,
+  missingDocumentsByAdult,
+  normalizeCandidateEmail,
+  normalizeCandidatePhone,
+} from "./spanish-market.js";
 
 const propertyStates = ["draft", "published", "paused", "archived"] as const;
 const applicantStatuses = ["new", "preselected", "selected", "rejected", "withdrawn"] as const;
 const agencyApplicantStatuses = ["new", "preselected", "selected", "rejected"] as const;
 const documentStates = ["complete", "missing", "not_requested"] as const;
-const documentCategories = ["payslips", "employment_contract", "self_employed_income", "supporting"] as const;
+const documentCategories = DOCUMENT_CATEGORIES;
 const appointmentStates = ["scheduled", "completed", "cancelled", "no_show"] as const;
 const CURRENT_CONSENT_VERSION = "privacy-2026-08-v1";
+const paginationQuery = {
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+};
+
+function pagination(page: number, pageSize: number, total: number) {
+  const totalPages = Math.ceil(total / pageSize);
+  return { page, pageSize, total, totalPages, hasMore: page < totalPages };
+}
 
 const idParam = z.string().uuid();
 const propertyInput = z.object({
@@ -69,14 +85,37 @@ const propertyUpdateInput = z.object({
   availableFrom: z.iso.date().optional(), description: z.string().trim().min(2).max(5_000).optional(), publicLocation: z.string().trim().min(2).max(240).optional(),
   coverImageUrl: z.url().max(2_000).nullable().optional(), galleryUrls: z.array(z.url().max(2_000)).max(20).optional(), monthlyRentCents: z.number().int().positive().max(100_000_000).optional(),
   responsibleUserId: z.string().uuid().nullable().optional(), requestedDocumentCategories: z.array(z.enum(documentCategories)).max(documentCategories.length).optional(),
-}).refine((value) => Object.values(value).some((item) => item !== undefined), "Incluye al menos un cambio.");
+  expectedVersion: z.number().int().positive().optional(),
+}).refine((value) => Object.entries(value).some(([key, item]) => key !== "expectedVersion" && item !== undefined), "Incluye al menos un cambio.");
 
-const applicationForm = z.object({
+const additionalAdult = z.object({
+  id: z.string().uuid(),
+  fullName: z.string().trim().min(2).max(200),
+  email: z.email().max(320).nullable().default(null),
+  phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/).nullable().default(null),
+  employmentStatus: z.string().trim().min(1).max(100),
+  employerOrActivity: z.string().trim().min(1).max(200),
+  contractType: z.string().trim().min(1).max(100),
+  netMonthlyIncomeCents: z.number().int().min(0).max(100_000_000),
+}).strict();
+const additionalAdultDraft = z.object({
+  id: z.string().uuid(),
+  fullName: z.string().trim().max(200).optional(),
+  email: z.union([z.email().max(320), z.literal("")]).nullable().optional(),
+  phone: z.union([z.string().trim().regex(/^\+[1-9]\d{7,14}$/), z.literal("")]).nullable().optional(),
+  employmentStatus: z.string().trim().max(100).optional(),
+  employerOrActivity: z.string().trim().max(200).optional(),
+  contractType: z.string().trim().max(100).optional(),
+  netMonthlyIncomeCents: z.number().int().min(0).max(100_000_000).optional(),
+}).strict();
+
+const applicationFormFields = z.object({
   fullName: z.string().trim().min(2).max(200),
   email: z.email().max(320),
   phone: z.string().trim().regex(/^\+[1-9]\d{7,14}$/),
   preferredContactChannel: z.enum(["whatsapp", "phone", "email"]),
   adultOccupants: z.number().int().min(1).max(20),
+  additionalAdults: z.array(additionalAdult).max(19).default([]),
   minorOccupants: z.number().int().min(0).max(20),
   intendedMoveInDate: z.iso.date(),
   pets: z.enum(["yes", "no"]),
@@ -92,10 +131,36 @@ const applicationForm = z.object({
   availabilityNote: z.string().trim().max(1_000).nullable().default(null),
   marketingConsent: z.boolean().default(false),
 });
+const applicationForm = applicationFormFields.superRefine((value, context) => {
+  if (value.adultOccupants !== value.additionalAdults.length + 1) {
+    context.addIssue({
+      code: "custom",
+      message: "Incluye los datos de cada persona adulta que formará parte de la solicitud.",
+      path: ["additionalAdults"],
+    });
+  }
+  const ids = value.additionalAdults.map((adult) => adult.id);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: "custom", message: "Cada persona adulta debe tener un identificador distinto.", path: ["additionalAdults"] });
+  }
+});
 
-const applicationDraft = applicationForm.partial().extend({
+const applicationDraft = applicationFormFields.partial().extend({
+  additionalAdults: z.array(additionalAdultDraft).max(19).optional(),
   viewingAvailability: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
 });
+
+function adultProfilesForDraft(draft: z.infer<typeof applicationDraft>) {
+  if (!draft.fullName || !draft.email || !draft.phone || !draft.employmentStatus || !draft.employerOrActivity || !draft.contractType || draft.individualNetMonthlyIncomeCents === undefined) return null;
+  const additionalAdults = z.array(additionalAdult).safeParse(draft.additionalAdults ?? []);
+  if (!additionalAdults.success) return null;
+  return adultProfilesFromApplication({
+    fullName: draft.fullName, email: draft.email, phone: draft.phone,
+    employmentStatus: draft.employmentStatus, employerOrActivity: draft.employerOrActivity,
+    contractType: draft.contractType, individualNetMonthlyIncomeCents: draft.individualNetMonthlyIncomeCents,
+    additionalAdults: additionalAdults.data,
+  });
+}
 const appointmentInput = z.object({
   applicationId: z.string().uuid(),
   startsAt: z.iso.datetime({ offset: true }),
@@ -263,7 +328,7 @@ function publicProperty(record: Awaited<ReturnType<typeof propertyForToken>>) {
 }
 
 function safeApplication<T extends typeof applications.$inferSelect>(application: T) {
-  const { sourceLinkTokenHash: _sourceLinkTokenHash, submissionKeyHash: _submissionKeyHash, ...safe } = application;
+  const { sourceLinkTokenHash: _sourceLinkTokenHash, submissionKeyHash: _submissionKeyHash, normalizedEmail: _normalizedEmail, normalizedPhone: _normalizedPhone, ...safe } = application;
   return safe;
 }
 
@@ -306,6 +371,36 @@ function safeDocument<T extends typeof applicationDocuments.$inferSelect>(docume
   return safe;
 }
 
+type DuplicateApplication = Pick<typeof applications.$inferSelect, "id" | "normalizedEmail" | "normalizedPhone">;
+
+async function duplicateSignals(db: Database, propertyId: string, candidates: DuplicateApplication[]) {
+  const phones = [...new Set(candidates.map((item) => item.normalizedPhone).filter((value): value is string => Boolean(value)))];
+  const emails = [...new Set(candidates.map((item) => item.normalizedEmail).filter((value): value is string => Boolean(value)))];
+  if (!phones.length && !emails.length) return new Map<string, { matchedOn: Array<"email" | "phone">; applicationIds: string[] }>();
+  const matching = await db.select({ id: applications.id, normalizedEmail: applications.normalizedEmail, normalizedPhone: applications.normalizedPhone })
+    .from(applications).where(and(
+      eq(applications.propertyId, propertyId),
+      isNotNull(applications.submittedAt),
+      or(phones.length ? inArray(applications.normalizedPhone, phones) : undefined, emails.length ? inArray(applications.normalizedEmail, emails) : undefined)!,
+    ));
+  const result = new Map<string, { matchedOn: Array<"email" | "phone">; applicationIds: string[] }>();
+  for (const candidate of candidates) {
+    const peers = matching.filter((item) => item.id !== candidate.id && (
+      (candidate.normalizedEmail && item.normalizedEmail === candidate.normalizedEmail)
+      || (candidate.normalizedPhone && item.normalizedPhone === candidate.normalizedPhone)
+    ));
+    if (!peers.length) continue;
+    result.set(candidate.id, {
+      matchedOn: [
+        ...(candidate.normalizedEmail && peers.some((peer) => peer.normalizedEmail === candidate.normalizedEmail) ? ["email" as const] : []),
+        ...(candidate.normalizedPhone && peers.some((peer) => peer.normalizedPhone === candidate.normalizedPhone) ? ["phone" as const] : []),
+      ],
+      applicationIds: peers.map((peer) => peer.id),
+    });
+  }
+  return result;
+}
+
 async function refreshDocumentStateLocked(
   db: Database,
   applicationId: string,
@@ -313,7 +408,7 @@ async function refreshDocumentStateLocked(
   changedAt: Date,
   beforeWrite?: (applicationId: string) => Promise<void>,
 ): Promise<void> {
-  const applicationRows = await db.select({ propertyId: applications.propertyId, retentionState: applications.retentionState })
+  const applicationRows = await db.select({ propertyId: applications.propertyId, retentionState: applications.retentionState, adultProfiles: applications.adultProfiles })
     .from(applications).where(and(eq(applications.id, applicationId), eq(applications.agencyId, agencyId))).for("update").limit(1);
   const application = applicationRows[0];
   if (!application || application.retentionState !== "active") return;
@@ -322,10 +417,9 @@ async function refreshDocumentStateLocked(
   const requested = propertyRows[0]?.requested ?? [];
   let state: (typeof documentStates)[number] = "not_requested";
   if (requested.length > 0) {
-    const docs = await db.select({ category: applicationDocuments.category }).from(applicationDocuments)
+    const docs = await db.select({ category: applicationDocuments.category, adultProfileId: applicationDocuments.adultProfileId }).from(applicationDocuments)
       .where(and(eq(applicationDocuments.applicationId, applicationId), eq(applicationDocuments.agencyId, agencyId), eq(applicationDocuments.malwareScanState, "clean"), eq(applicationDocuments.deletionState, "active")));
-    const present = new Set(docs.map((document) => document.category));
-    state = requested.every((category) => present.has(category)) ? "complete" : "missing";
+    state = missingDocumentsByAdult(requested, application.adultProfiles.length ? application.adultProfiles : [{ id: "primary" }], docs).length === 0 ? "complete" : "missing";
   }
   await beforeWrite?.(applicationId);
   await db.update(applications).set({ documentState: state, updatedAt: changedAt })
@@ -413,21 +507,26 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
 
   app.get("/api/v1/agency/properties", { schema: { tags: ["Agencia"], summary: "Listar anuncios" } }, async (request) => {
     const { user, agency } = requireAgency(request);
-    const query = z.object({ search: z.string().trim().max(200).optional(), state: z.enum(propertyStates).optional() }).parse(request.query);
+    const query = z.object({ propertyId: z.string().uuid().optional(), search: z.string().trim().max(200).optional(), state: z.enum(propertyStates).optional(), hasRecentNewApplicants: z.literal("true").optional(), ...paginationQuery }).parse(request.query);
     const clauses = [eq(properties.agencyId, agency.id)];
+    if (query.propertyId) clauses.push(eq(properties.id, query.propertyId));
     if (query.state) clauses.push(eq(properties.state, query.state));
     if (query.search) {
       const term = `%${query.search}%`;
       clauses.push(or(ilike(properties.title, term), ilike(properties.internalReference, term), ilike(properties.address, term))!);
     }
     const recentApplicantCutoff = new Date(nowFor(deps).getTime() - (30 * 24 * 60 * 60 * 1000));
+    if (query.hasRecentNewApplicants) clauses.push(sql`exists (select 1 from ${applications} recent_application where recent_application.property_id = ${properties.id} and recent_application.agency_id = ${agency.id} and recent_application.status = 'new' and recent_application.submitted_at >= ${recentApplicantCutoff})`);
+    const totalRows = await deps.db.select({ total: count() }).from(properties).where(and(...clauses));
+    const total = totalRows[0]?.total ?? 0;
     const rows = await deps.db.select({
       property: properties,
       applicantCount: sql<number>`count(${applications.id})::int`,
       newApplicantCount: sql<number>`count(${applications.id}) filter (where ${applications.status} = 'new' and ${applications.submittedAt} is not null)::int`,
       recentNewApplicantCount: sql<number>`count(${applications.id}) filter (where ${applications.status} = 'new' and ${applications.submittedAt} >= ${recentApplicantCutoff.toISOString()}::timestamptz)::int`,
     }).from(properties).leftJoin(applications, and(eq(applications.propertyId, properties.id), eq(applications.agencyId, agency.id), isNotNull(applications.submittedAt)))
-      .where(and(...clauses)).groupBy(properties.id).orderBy(desc(properties.updatedAt));
+      .where(and(...clauses)).groupBy(properties.id).orderBy(desc(properties.updatedAt), asc(properties.id))
+      .limit(query.pageSize).offset((query.page - 1) * query.pageSize);
     const propertyIds = rows.map((row) => row.property.id);
     const viewingRows = propertyIds.length ? await deps.db.select({ appointment: appointments }).from(appointments)
       .innerJoin(applications, and(
@@ -437,7 +536,10 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       .orderBy(asc(appointments.startsAt)) : [];
     const nextViewingByProperty = new Map<string, typeof appointments.$inferSelect>();
     for (const row of viewingRows) if (!nextViewingByProperty.has(row.appointment.propertyId)) nextViewingByProperty.set(row.appointment.propertyId, row.appointment);
-    return { data: { properties: rows.map((row) => ({ ...row, property: safeProperty(row.property), nextViewing: nextViewingByProperty.get(row.property.id) ?? null })) } };
+    return { data: { properties: rows.map((row) => {
+      const nextViewing = nextViewingByProperty.get(row.property.id);
+      return { ...row, property: safeProperty(row.property), nextViewing: nextViewing ? safeAppointment(nextViewing) : null };
+    }), pagination: pagination(query.page, query.pageSize, total) } };
   });
 
   app.patch("/api/v1/agency/properties/:propertyId", { schema: { tags: ["Agencia"], summary: "Editar un anuncio" } }, async (request) => {
@@ -445,30 +547,39 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     const propertyId = idParam.parse((request.params as { propertyId?: unknown }).propertyId);
     await agencyProperty(deps, agency.id, propertyId);
     const input = propertyUpdateInput.parse(request.body);
-    if (input.responsibleUserId) await assertAgencyMember(deps.db, agency.id, input.responsibleUserId);
+    const { expectedVersion, ...changes } = input;
+    if (changes.responsibleUserId) await assertAgencyMember(deps.db, agency.id, changes.responsibleUserId);
     const changedAt = nowFor(deps);
     await options.beforeAgencyWrite?.("property");
     try { await deps.db.transaction(async (tx) => {
       await lockActiveAgency(tx as unknown as Database, agency.id, { userId: user.id });
-      if (input.responsibleUserId) await assertAgencyMember(tx as unknown as Database, agency.id, input.responsibleUserId);
-      await tx.update(properties).set({ ...input, updatedAt: changedAt })
-        .where(and(eq(properties.id, propertyId), eq(properties.agencyId, agency.id)));
-      if (input.requestedDocumentCategories !== undefined) {
-        const applicationRows = await tx.select({ id: applications.id }).from(applications)
+      if (changes.responsibleUserId) await assertAgencyMember(tx as unknown as Database, agency.id, changes.responsibleUserId);
+      if (expectedVersion !== undefined) {
+        const current = await tx.select({ version: properties.version }).from(properties)
+          .where(and(eq(properties.id, propertyId), eq(properties.agencyId, agency.id))).for("update").limit(1);
+        if (!current[0] || current[0].version !== expectedVersion) throw new ApiError(409, "PROPERTY_CHANGED", "El anuncio ha cambiado. Actualiza la vista antes de volver a intentarlo.");
+        const updated = await tx.update(properties).set({ ...changes, version: expectedVersion + 1, updatedAt: changedAt })
+          .where(and(eq(properties.id, propertyId), eq(properties.agencyId, agency.id), eq(properties.version, expectedVersion))).returning({ id: properties.id });
+        if (!updated[0]) throw new ApiError(409, "PROPERTY_CHANGED", "El anuncio ha cambiado. Actualiza la vista antes de volver a intentarlo.");
+      } else {
+        await tx.update(properties).set({ ...changes, updatedAt: changedAt })
+          .where(and(eq(properties.id, propertyId), eq(properties.agencyId, agency.id)));
+      }
+      if (changes.requestedDocumentCategories !== undefined) {
+        const applicationRows = await tx.select({ id: applications.id, adultProfiles: applications.adultProfiles }).from(applications)
           .where(and(eq(applications.propertyId, propertyId), eq(applications.agencyId, agency.id), eq(applications.retentionState, "active")));
         const applicationIds = applicationRows.map((application) => application.id);
-        const documentRows = applicationIds.length ? await tx.select({ applicationId: applicationDocuments.applicationId, category: applicationDocuments.category }).from(applicationDocuments)
+        const documentRows = applicationIds.length ? await tx.select({ applicationId: applicationDocuments.applicationId, category: applicationDocuments.category, adultProfileId: applicationDocuments.adultProfileId }).from(applicationDocuments)
           .where(and(eq(applicationDocuments.agencyId, agency.id), inArray(applicationDocuments.applicationId, applicationIds), eq(applicationDocuments.malwareScanState, "clean"), eq(applicationDocuments.deletionState, "active"))) : [];
-        const categoriesByApplication = new Map<string, Set<string>>();
+        const documentsByApplication = new Map<string, Array<{ category: string; adultProfileId: string }>>();
         for (const document of documentRows) {
-          const categories = categoriesByApplication.get(document.applicationId) ?? new Set<string>();
-          categories.add(document.category);
-          categoriesByApplication.set(document.applicationId, categories);
+          const grouped = documentsByApplication.get(document.applicationId) ?? [];
+          grouped.push(document);
+          documentsByApplication.set(document.applicationId, grouped);
         }
         for (const application of applicationRows) {
-          const present = categoriesByApplication.get(application.id) ?? new Set<string>();
-          const documentState = input.requestedDocumentCategories.length === 0 ? "not_requested"
-            : input.requestedDocumentCategories.every((category) => present.has(category)) ? "complete" : "missing";
+          const documentState = changes.requestedDocumentCategories.length === 0 ? "not_requested"
+            : missingDocumentsByAdult(changes.requestedDocumentCategories, application.adultProfiles.length ? application.adultProfiles : [{ id: "primary" }], documentsByApplication.get(application.id) ?? []).length === 0 ? "complete" : "missing";
           await tx.update(applications).set({ documentState, updatedAt: changedAt })
             .where(and(eq(applications.id, application.id), eq(applications.agencyId, agency.id)));
         }
@@ -614,6 +725,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     // Zod defaults are useful for final submission but autosave must distinguish
     // omission (preserve) from an explicit null/value (replace).
     const draftData = Object.fromEntries(Object.entries(parsedDraft).filter(([key]) => Object.hasOwn(rawDraft, key))) as typeof parsedDraft;
+    const draftAdultProfiles = adultProfilesForDraft(parsedDraft);
     const changedAt = nowFor(deps);
     const applicationId = newId();
     await options.beforeApplicationWrite?.("draft");
@@ -631,8 +743,15 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       if (current?.submittedAt) throw new ApiError(409, "APPLICATION_ALREADY_SUBMITTED", "Esta solicitud ya se ha enviado.");
       if (current) {
         assertApplicationActive(current);
+        if (draftAdultProfiles) {
+          const retainedIds = new Set(draftAdultProfiles.map((adult) => adult.id));
+          const ownedDocuments = await tx.select({ adultProfileId: applicationDocuments.adultProfileId }).from(applicationDocuments).where(and(eq(applicationDocuments.applicationId, current.id), eq(applicationDocuments.deletionState, "active")));
+          if (ownedDocuments.some((document) => !retainedIds.has(document.adultProfileId))) throw new ApiError(409, "ADULT_PROFILE_HAS_DOCUMENTS", "Elimina primero la documentación de la persona adulta que quieres quitar de la solicitud.");
+        }
         const updated = await tx.update(applications).set({
-          draftData: sql`${applications.draftData} || ${draftData}::jsonb`, sourceLinkTokenHash: record.tokenHash, updatedAt: changedAt,
+          draftData: sql`${applications.draftData} || ${draftData}::jsonb`,
+          ...(draftAdultProfiles ? { adultProfiles: draftAdultProfiles } : {}),
+          sourceLinkTokenHash: record.tokenHash, updatedAt: changedAt,
         }).where(and(eq(applications.id, current.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active"), isNull(applications.submittedAt))).returning({ id: applications.id });
         if (!updated[0]) throw new ApiError(409, "APPLICATION_RETENTION_IN_PROGRESS", "La solicitud está en proceso de eliminación y ya no admite cambios.");
         return { id: updated[0].id, created: false };
@@ -640,7 +759,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       const inserted = await tx.insert(applications).values({
         id: applicationId, agencyId: record.property.agencyId, propertyId: record.property.id, tenantUserId: tenant.id,
         responsibleUserId: null, status: "new", documentState: property.requestedDocumentCategories.length ? "missing" : "not_requested",
-        draftData, sourceLinkTokenHash: record.tokenHash, createdAt: changedAt, updatedAt: changedAt,
+        draftData, adultProfiles: draftAdultProfiles ?? [], sourceLinkTokenHash: record.tokenHash, createdAt: changedAt, updatedAt: changedAt,
       }).returning({ id: applications.id });
       return { id: inserted[0]!.id, created: true };
     });
@@ -661,6 +780,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     if (input.application.email.toLowerCase() !== tenant.email.toLowerCase()) {
       throw new ApiError(422, "VERIFIED_EMAIL_MISMATCH", "El correo de la solicitud debe coincidir con el correo verificado de tu cuenta.");
     }
+    const adultProfiles = adultProfilesFromApplication(input.application);
     const submissionKeyHash = hashSecret(`${tenant.id}:${record.property.id}:${input.submissionKey}`);
     const changedAt = nowFor(deps);
     await options.beforeApplicationWrite?.("submit");
@@ -682,10 +802,9 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
         }
       } else if (property.requestedDocumentCategories.length > 0) {
         if (!application) throw new ApiError(409, "APPLICATION_DRAFT_REQUIRED", "Guarda el borrador antes de añadir la documentación solicitada.");
-        const uploaded = await tx.select({ category: applicationDocuments.category }).from(applicationDocuments)
+        const uploaded = await tx.select({ category: applicationDocuments.category, adultProfileId: applicationDocuments.adultProfileId }).from(applicationDocuments)
           .where(and(eq(applicationDocuments.applicationId, application.id), eq(applicationDocuments.tenantUserId, tenant.id), eq(applicationDocuments.malwareScanState, "clean"), eq(applicationDocuments.deletionState, "active")));
-        const present = new Set(uploaded.map((document) => document.category));
-        const missing = property.requestedDocumentCategories.filter((category) => !present.has(category));
+        const missing = missingDocumentsByAdult(property.requestedDocumentCategories, adultProfiles, uploaded);
         if (missing.length) {
           await tx.update(applications).set({ documentState: "missing", updatedAt: changedAt })
             .where(and(eq(applications.id, application.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active")));
@@ -702,6 +821,11 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       } else if (application) {
         const updated = await tx.update(applications).set({
           draftData: input.application, consentVersion: input.consentVersion, consentedAt: changedAt,
+          phone: input.application.phone, normalizedPhone: normalizeCandidatePhone(input.application.phone), normalizedEmail: normalizeCandidateEmail(input.application.email), adultProfiles,
+          individualNetMonthlyIncomeCents: input.application.individualNetMonthlyIncomeCents,
+          householdNetMonthlyIncomeCents: input.application.householdNetMonthlyIncomeCents, adultOccupants: input.application.adultOccupants,
+          minorOccupants: input.application.minorOccupants, intendedMoveInDate: input.application.intendedMoveInDate,
+          applicationDataPromotedAt: changedAt,
           submittedAt: changedAt, documentState: property.requestedDocumentCategories.length ? "complete" : "not_requested",
           responsibleUserId: null, sourceLinkTokenHash: record.tokenHash, submissionKeyHash, updatedAt: changedAt,
         }).where(and(eq(applications.id, application.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active"), isNull(applications.submittedAt))).returning();
@@ -713,6 +837,11 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
           id: applicationId, agencyId: property.agencyId, propertyId: property.id, tenantUserId: tenant.id,
           responsibleUserId: null, status: "new", documentState: "not_requested",
           submittedAt: changedAt, draftData: input.application, consentVersion: input.consentVersion, consentedAt: changedAt,
+          phone: input.application.phone, normalizedPhone: normalizeCandidatePhone(input.application.phone), normalizedEmail: normalizeCandidateEmail(input.application.email), adultProfiles,
+          individualNetMonthlyIncomeCents: input.application.individualNetMonthlyIncomeCents,
+          householdNetMonthlyIncomeCents: input.application.householdNetMonthlyIncomeCents, adultOccupants: input.application.adultOccupants,
+          minorOccupants: input.application.minorOccupants, intendedMoveInDate: input.application.intendedMoveInDate,
+          applicationDataPromotedAt: changedAt,
           sourceLinkTokenHash: record.tokenHash, submissionKeyHash, createdAt: changedAt, updatedAt: changedAt,
         }).returning();
         persisted = inserted[0]!;
@@ -729,7 +858,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       return { missing: null, application: persisted, idempotentReplay };
     });
     if (result.missing) {
-      throw new ApiError(422, "REQUESTED_DOCUMENTS_MISSING", "Añade toda la documentación solicitada antes de enviar.", { missingCategories: result.missing });
+      throw new ApiError(422, "REQUESTED_DOCUMENTS_MISSING", "Añade la documentación solicitada de cada persona adulta antes de enviar.", { missingCategories: [...new Set(result.missing.flatMap((item) => item.categories))], missingByAdult: result.missing });
     }
     const response = { data: { application: safeApplication(result.application!), idempotentReplay: result.idempotentReplay } };
     return result.idempotentReplay ? response : reply.status(201).send(response);
@@ -737,7 +866,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
 
   app.get("/api/v1/tenant/applications", { schema: { tags: ["Inquilinos"], summary: "Listar solicitudes propias" } }, async (request) => {
     const tenant = requireTenant(request);
-    const rows = await deps.db.select({ application: applications, property: { id: properties.id, title: properties.title, publicLocation: properties.publicLocation, coverImageUrl: properties.coverImageUrl } })
+    const rows = await deps.db.select({ application: applications, property: properties })
       .from(applications).innerJoin(properties, eq(properties.id, applications.propertyId))
       .where(eq(applications.tenantUserId, tenant.id)).orderBy(desc(applications.updatedAt));
     return { data: { applications: rows.map((row) => ({
@@ -748,8 +877,60 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
         submittedAt: row.application.submittedAt,
         updatedAt: row.application.updatedAt,
       },
-      property: row.property,
+      property: { id: row.property.id, title: row.property.title, publicLocation: row.property.publicLocation, coverImageUrl: row.property.coverImageUrl },
+      resumePath: (() => {
+        if (row.application.submittedAt || row.property.state !== "published" || row.application.sourceLinkTokenHash !== row.property.publicLinkTokenHash) return null;
+        try {
+          return `/solicitud/${openPublicLinkToken(providers, row.property)}`;
+        } catch {
+          return null;
+        }
+      })(),
     })) } };
+  });
+
+  app.get("/api/v1/tenant/applications/:applicationId", { schema: { tags: ["Inquilinos"], summary: "Consultar una solicitud propia" } }, async (request) => {
+    const tenant = requireTenant(request);
+    const applicationId = idParam.parse((request.params as { applicationId?: unknown }).applicationId);
+    const application = await tenantApplication(deps, tenant.id, applicationId);
+    assertApplicationActive(application);
+    const [contextRows, documents] = await Promise.all([
+      deps.db.select({ property: properties, agencyName: agencies.name }).from(properties)
+        .innerJoin(agencies, eq(agencies.id, properties.agencyId))
+        .where(and(eq(properties.id, application.propertyId), eq(properties.agencyId, application.agencyId))).limit(1),
+      deps.db.select().from(applicationDocuments).where(and(
+        eq(applicationDocuments.applicationId, application.id),
+        eq(applicationDocuments.tenantUserId, tenant.id),
+        eq(applicationDocuments.deletionState, "active"),
+      )).orderBy(desc(applicationDocuments.createdAt)),
+    ]);
+    const context = contextRows[0];
+    if (!context) throw new ApiError(404, "APPLICATION_NOT_FOUND", "No se ha encontrado la solicitud.");
+    return { data: {
+      application: {
+        id: application.id,
+        status: application.status,
+        documentState: application.documentState,
+        submittedAt: application.submittedAt,
+        updatedAt: application.updatedAt,
+      },
+      property: {
+        id: context.property.id,
+        agencyName: context.agencyName,
+        internalReference: context.property.internalReference,
+        title: context.property.title,
+        publicLocation: context.property.publicLocation ?? context.property.city,
+        monthlyRentCents: context.property.monthlyRentCents,
+        propertyType: context.property.propertyType,
+        bedrooms: context.property.bedrooms,
+        bathrooms: context.property.bathrooms,
+        floorAreaSqm: context.property.floorAreaSqm,
+        availableFrom: context.property.availableFrom,
+        coverImageUrl: context.property.coverImageUrl,
+        requestedDocumentCategories: context.property.requestedDocumentCategories,
+      },
+      documents: documents.map(safeDocument),
+    } };
   });
 
   app.post("/api/v1/tenant/applications/:applicationId/withdraw", { schema: { tags: ["Inquilinos"], summary: "Retirar una solicitud propia" } }, async (request) => {
@@ -781,29 +962,42 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     const query = z.object({
       search: z.string().trim().max(200).optional(), status: z.enum(applicantStatuses).optional(), documentState: z.enum(documentStates).optional(),
       viewingState: z.enum(["none", "scheduled", "completed"]).optional(), responsibleUserId: z.string().uuid().optional(),
+      responsibility: z.enum(["assigned", "unassigned"]).optional(),
       submittedFrom: z.iso.datetime({ offset: true }).optional(), submittedTo: z.iso.datetime({ offset: true }).optional(),
       sort: z.enum(["newest", "oldest", "income", "status", "next_viewing"]).default("newest"),
+      ...paginationQuery,
     }).parse(request.query);
     const clauses = [eq(applications.agencyId, agency.id), eq(applications.propertyId, propertyId), isNotNull(applications.submittedAt)];
     if (query.status) clauses.push(eq(applications.status, query.status));
     if (query.documentState) clauses.push(eq(applications.documentState, query.documentState));
     if (query.responsibleUserId) clauses.push(eq(applications.responsibleUserId, query.responsibleUserId));
+    if (query.responsibility === "assigned") clauses.push(isNotNull(applications.responsibleUserId));
+    if (query.responsibility === "unassigned") clauses.push(isNull(applications.responsibleUserId));
     if (query.submittedFrom) clauses.push(gte(applications.submittedAt, new Date(query.submittedFrom)));
     if (query.submittedTo) clauses.push(lte(applications.submittedAt, new Date(query.submittedTo)));
     if (query.search) {
       const term = `%${query.search}%`;
-      clauses.push(or(ilike(users.fullName, term), ilike(users.email, term), sql`${applications.draftData}->>'phone' ilike ${term}`)!);
+      const normalizedPhonePrefix = query.search.replace(/\s/g, "");
+      clauses.push(or(
+        ilike(users.fullName, term),
+        ilike(users.email, term),
+        /^\+?\d+$/.test(normalizedPhonePrefix) ? sql`${applications.phone} like ${`${normalizedPhonePrefix}%`}` : undefined,
+      )!);
     }
     if (query.viewingState === "scheduled") clauses.push(sql`exists (select 1 from ${appointments} ap where ap.application_id = ${applications.id} and ap.agency_id = ${agency.id} and ap.state = 'scheduled')`);
     if (query.viewingState === "completed") clauses.push(sql`exists (select 1 from ${appointments} ap where ap.application_id = ${applications.id} and ap.agency_id = ${agency.id} and ap.state = 'completed')`);
     if (query.viewingState === "none") clauses.push(sql`not exists (select 1 from ${appointments} ap where ap.application_id = ${applications.id} and ap.agency_id = ${agency.id} and ap.state in ('scheduled','completed'))`);
-    const ordering = query.sort === "oldest" ? asc(applications.submittedAt)
-      : query.sort === "income" ? desc(sql`coalesce((${applications.draftData}->>'householdNetMonthlyIncomeCents')::bigint, 0)`)
-      : query.sort === "status" ? asc(applications.status)
-      : query.sort === "next_viewing" ? asc(sql`(select min(ap.starts_at) from appointments ap where ap.application_id = ${applications.id} and ap.agency_id = ${agency.id} and ap.state = 'scheduled') nulls last`)
-      : desc(applications.submittedAt);
+    const ordering = query.sort === "oldest" ? [asc(applications.submittedAt), asc(applications.id)]
+      : query.sort === "income" ? [sql`${applications.householdNetMonthlyIncomeCents} desc nulls last`, desc(applications.submittedAt), asc(applications.id)]
+      : query.sort === "status" ? [asc(applications.status), desc(applications.submittedAt), asc(applications.id)]
+      : query.sort === "next_viewing" ? [sql`(select min(ap.starts_at) from appointments ap where ap.application_id = ${applications.id} and ap.agency_id = ${agency.id} and ap.state = 'scheduled') asc nulls last`, desc(applications.submittedAt), asc(applications.id)]
+      : [desc(applications.submittedAt), asc(applications.id)];
+    const totalRows = await deps.db.select({ total: count() }).from(applications)
+      .innerJoin(users, eq(users.id, applications.tenantUserId)).where(and(...clauses));
+    const total = totalRows[0]?.total ?? 0;
     const rows = await deps.db.select({ application: applications, tenantName: users.fullName, tenantEmail: users.email })
-      .from(applications).innerJoin(users, eq(users.id, applications.tenantUserId)).where(and(...clauses)).orderBy(ordering);
+      .from(applications).innerJoin(users, eq(users.id, applications.tenantUserId)).where(and(...clauses)).orderBy(...ordering)
+      .limit(query.pageSize).offset((query.page - 1) * query.pageSize);
     const ids = rows.map((row) => row.application.id);
     const responsibleUserIds = [...new Set(rows.map((row) => row.application.responsibleUserId).filter((id): id is string => Boolean(id)))];
     const responsibleUsers = responsibleUserIds.length
@@ -811,14 +1005,16 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       : [];
     const responsibleNameById = new Map(responsibleUsers.map((responsibleUser) => [responsibleUser.id, responsibleUser.fullName]));
     const upcoming = ids.length ? await deps.db.select().from(appointments).where(and(eq(appointments.agencyId, agency.id), inArray(appointments.applicationId, ids), eq(appointments.state, "scheduled"))).orderBy(asc(appointments.startsAt)) : [];
+    const duplicateByApplication = await duplicateSignals(deps.db, propertyId, rows.map((row) => row.application));
     const nextByApplication = new Map<string, typeof upcoming[number]>();
     for (const appointment of upcoming) if (!nextByApplication.has(appointment.applicationId)) nextByApplication.set(appointment.applicationId, appointment);
     return { data: { applications: rows.map((row) => ({
       ...row,
       application: safeApplication(row.application),
       responsibleUserName: row.application.responsibleUserId ? responsibleNameById.get(row.application.responsibleUserId) ?? "Usuario eliminado" : null,
-      nextViewing: nextByApplication.get(row.application.id) ?? null,
-    })) } };
+      nextViewing: nextByApplication.has(row.application.id) ? safeAppointment(nextByApplication.get(row.application.id)!) : null,
+      possibleDuplicate: duplicateByApplication.get(row.application.id) ?? null,
+    })), pagination: pagination(query.page, query.pageSize, total) } };
   });
 
   app.get("/api/v1/agency/applications/:applicationId", { schema: { tags: ["Agencia"], summary: "Consultar el detalle de un interesado" } }, async (request) => {
@@ -827,6 +1023,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     await deps.db.transaction(async (tx) => lockActiveAgency(tx as unknown as Database, agency.id, { userId: user.id }));
     const applicationId = idParam.parse((request.params as { applicationId?: unknown }).applicationId);
     const application = await agencyApplication(deps, agency.id, applicationId);
+    const duplicateByApplication = await duplicateSignals(deps.db, application.propertyId, [application]);
     const [property, applicantRows, responsibleRows, documents, notes, history, viewingHistory, audits] = await Promise.all([
       agencyProperty(deps, agency.id, application.propertyId),
       deps.db.select({ fullName: users.fullName, email: users.email }).from(users).where(and(eq(users.id, application.tenantUserId), eq(users.kind, "tenant"))).limit(1),
@@ -846,7 +1043,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       ...notes.map((item) => ({ id: item.note.id, type: "note_added", actorUserId: item.note.authorUserId, createdAt: item.note.createdAt, metadata: {} })),
       ...audits.filter((event) => event.action !== "application_status_changed").map((event) => ({ id: event.id, type: event.action, actorUserId: event.actorUserId, createdAt: event.createdAt, metadata: event.metadata })),
     ].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
-    return { data: { application: safeApplication(application), applicant: applicantRows[0] ?? null, responsibleUser: responsibleRows[0] ?? null, property: safeProperty(property), documents: documents.map(safeDocument), notes: notes.map((item) => ({ ...item, authorName: item.authorName ?? "Usuario eliminado" })), statusHistory: history, appointments: viewingHistory.map(safeAppointment), activity } };
+    return { data: { application: safeApplication(application), applicant: applicantRows[0] ?? null, responsibleUser: responsibleRows[0] ?? null, property: safeProperty(property), documents: documents.map(safeDocument), possibleDuplicate: duplicateByApplication.get(application.id) ?? null, notes: notes.map((item) => ({ ...item, authorName: item.authorName ?? "Usuario eliminado" })), statusHistory: history, appointments: viewingHistory.map(safeAppointment), activity } };
   });
 
   app.patch("/api/v1/agency/applications/:applicationId/status", { schema: { tags: ["Agencia"], summary: "Cambiar el estado de un interesado" } }, async (request) => {
@@ -917,7 +1114,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     assertApplicationActive(application);
     const property = await agencyProperty(deps, agency.id, application.propertyId);
     const data = application.draftData as Record<string, unknown>;
-    const phone = typeof data.phone === "string" ? data.phone.replace(/\D/g, "") : "";
+    const phone = (application.phone ?? (typeof data.phone === "string" ? data.phone : "")).replace(/\D/g, "");
     if (!/^\d{8,15}$/.test(phone)) throw new ApiError(422, "INVALID_PHONE", "El teléfono del interesado no es válido para WhatsApp.");
     const tenantName = typeof data.fullName === "string" ? data.fullName : "";
     const defaultMessage = `Hola, ${tenantName}. Soy ${user.fullName} de ${agency.name}. Te contacto por tu interés en el inmueble ${property.internalReference}.`;
@@ -938,7 +1135,10 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     const applicationId = idParam.parse((request.params as { applicationId?: unknown }).applicationId);
     const application = await tenantApplication(deps, tenant.id, applicationId);
     assertApplicationActive(application);
-    const input = z.object({ category: z.enum(documentCategories), originalName: z.string().trim().min(1).max(255), contentType: z.string(), dataBase64: z.string().min(4) }).parse(request.body);
+    const input = z.object({ adultProfileId: z.string().trim().min(1).max(50).default("primary"), category: z.enum(documentCategories), originalName: z.string().trim().min(1).max(255), contentType: z.string(), dataBase64: z.string().min(4) }).parse(request.body);
+    if (!(application.adultProfiles.length ? application.adultProfiles : [{ id: "primary" }]).some((adult) => adult.id === input.adultProfileId)) {
+      throw new ApiError(422, "ADULT_PROFILE_NOT_FOUND", "La persona adulta indicada no forma parte de esta solicitud.");
+    }
     const property = await agencyProperty(deps, application.agencyId, application.propertyId);
     if (!property.requestedDocumentCategories.includes(input.category)) throw new ApiError(422, "DOCUMENT_NOT_REQUESTED", "Este tipo de documento no se ha solicitado para el inmueble.");
     const expectedExtension = input.contentType === "application/pdf" ? /\.pdf$/i : input.contentType === "image/jpeg" ? /\.jpe?g$/i : input.contentType === "image/png" ? /\.png$/i : null;
@@ -967,7 +1167,8 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       if (!propertyRows[0]?.requested.includes(input.category)) throw new ApiError(422, "DOCUMENT_NOT_REQUESTED", "Este tipo de documento no se ha solicitado para el inmueble.");
       const locked = await tx.select().from(applications).where(and(eq(applications.id, applicationId), eq(applications.tenantUserId, tenant.id))).for("update").limit(1);
       if (!locked[0] || locked[0].retentionState !== "active") throw new ApiError(409, "APPLICATION_RETENTION_IN_PROGRESS", "La solicitud está en proceso de eliminación y ya no admite cambios.");
-      await tx.insert(applicationDocuments).values({ id: documentId, applicationId, agencyId: application.agencyId, tenantUserId: tenant.id, category: input.category, storageKey, originalName: input.originalName, contentType: decoded.contentType, byteSize: decoded.body.length, malwareScanState: "pending", createdAt, updatedAt: createdAt });
+      if (!(locked[0].adultProfiles.length ? locked[0].adultProfiles : [{ id: "primary" }]).some((adult) => adult.id === input.adultProfileId)) throw new ApiError(422, "ADULT_PROFILE_NOT_FOUND", "La persona adulta indicada no forma parte de esta solicitud.");
+      await tx.insert(applicationDocuments).values({ id: documentId, applicationId, agencyId: application.agencyId, tenantUserId: tenant.id, adultProfileId: input.adultProfileId, category: input.category, storageKey, originalName: input.originalName, contentType: decoded.contentType, byteSize: decoded.body.length, malwareScanState: "pending", createdAt, updatedAt: createdAt });
     });
 
     const tombstoneStaging = async (): Promise<void> => {
@@ -1029,7 +1230,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       await tombstoneStaging();
       throw new ApiError(409, "DOCUMENT_UPLOAD_INTERRUPTED", "La carga ya no puede completarse de forma segura. Vuelve a intentarlo.");
     }
-    return reply.status(201).send({ data: { document: { id: documentId, applicationId, category: input.category, originalName: input.originalName, contentType: decoded.contentType, byteSize: decoded.body.length, malwareScanState: "clean", scanProvider: scan.provider, createdAt } } });
+    return reply.status(201).send({ data: { document: { id: documentId, applicationId, adultProfileId: input.adultProfileId, category: input.category, originalName: input.originalName, contentType: decoded.contentType, byteSize: decoded.body.length, malwareScanState: "clean", scanProvider: scan.provider, createdAt } } });
   });
 
   app.get("/api/v1/tenant/applications/:applicationId/documents", { schema: { tags: ["Inquilinos"], summary: "Listar documentación propia" } }, async (request) => {
@@ -1184,17 +1385,22 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
 
   app.get("/api/v1/agency/appointments", { schema: { tags: ["Agencia"], summary: "Listar citas" } }, async (request) => {
     const { agency } = requireAgency(request);
-    const query = z.object({ state: z.enum(appointmentStates).optional(), from: z.iso.datetime({ offset: true }).optional(), to: z.iso.datetime({ offset: true }).optional() }).parse(request.query);
+    const query = z.object({ state: z.enum(appointmentStates).optional(), scope: z.enum(["upcoming", "past"]).optional(), from: z.iso.datetime({ offset: true }).optional(), to: z.iso.datetime({ offset: true }).optional(), ...paginationQuery }).parse(request.query);
     const clauses = [eq(appointments.agencyId, agency.id)];
     if (query.state) clauses.push(eq(appointments.state, query.state));
     if (query.from) clauses.push(gte(appointments.startsAt, new Date(query.from)));
     if (query.to) clauses.push(lte(appointments.startsAt, new Date(query.to)));
+    if (query.scope === "upcoming") clauses.push(and(eq(appointments.state, "scheduled"), gte(appointments.startsAt, nowFor(deps)))!);
+    if (query.scope === "past") clauses.push(or(ne(appointments.state, "scheduled"), lt(appointments.startsAt, nowFor(deps)))!);
+    const totalRows = await deps.db.select({ total: count() }).from(appointments).where(and(...clauses));
+    const total = totalRows[0]?.total ?? 0;
     const rows = await deps.db.select({ appointment: appointments, applicantName: users.fullName, propertyTitle: properties.title })
       .from(appointments)
       .innerJoin(applications, and(eq(applications.id, appointments.applicationId), eq(applications.agencyId, appointments.agencyId), eq(applications.propertyId, appointments.propertyId)))
       .innerJoin(users, eq(users.id, applications.tenantUserId))
       .innerJoin(properties, and(eq(properties.id, appointments.propertyId), eq(properties.agencyId, appointments.agencyId)))
-      .where(and(...clauses)).orderBy(asc(appointments.startsAt));
+      .where(and(...clauses)).orderBy(asc(appointments.startsAt), asc(appointments.id))
+      .limit(query.pageSize).offset((query.page - 1) * query.pageSize);
     const responsibleUserIds = [...new Set(rows.map((row) => row.appointment.responsibleUserId).filter((id): id is string => Boolean(id)))];
     const responsibleUsers = responsibleUserIds.length
       ? await deps.db.select({ id: users.id, fullName: users.fullName }).from(users).where(inArray(users.id, responsibleUserIds))
@@ -1206,7 +1412,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       propertyTitle: row.propertyTitle,
       responsibleUserName: row.appointment.responsibleUserId ? responsibleNameById.get(row.appointment.responsibleUserId) ?? "Usuario eliminado" : null,
       href: `/app/citas/${row.appointment.id}`,
-    })) } };
+    })), pagination: pagination(query.page, query.pageSize, total) } };
   });
 
   app.get("/api/v1/agency/appointments/:appointmentId", { schema: { tags: ["Agencia"], summary: "Consultar el detalle de una cita" } }, async (request) => {

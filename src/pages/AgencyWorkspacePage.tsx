@@ -25,14 +25,15 @@ import {
   NotePencil,
   Plus,
   SidebarSimple,
-  SignOut,
   SlidersHorizontal,
   Sparkle,
   UserCircle,
   Users,
+  Warning,
   WhatsappLogo,
   X,
 } from '@phosphor-icons/react'
+import { ApplicantCollaborationControls, PlanManager, PropertyCoverUpload, TeamManager, WorkspaceLogoutButton } from '../features/funnel/FunnelControls'
 import './AgencyWorkspacePage.css'
 
 type View = 'panel' | 'properties' | 'property' | 'appointments' | 'linkedApplicant' | 'linkedAppointment' | 'team' | 'settings' | 'billing'
@@ -180,6 +181,7 @@ type AgencyPropertyApi = {
     city: string
     province: string
     postalCode: string | null
+    publicLocation?: string | null
     propertyType: string | null
     monthlyRentCents: number
     bedrooms: number | null
@@ -188,6 +190,7 @@ type AgencyPropertyApi = {
     availableFrom: string | null
     description: string | null
     coverImageUrl: string | null
+    galleryUrls?: string[]
     requestedDocumentCategories: string[]
     state: 'draft' | 'published' | 'paused' | 'archived'
     version: number
@@ -218,11 +221,12 @@ type AgencyAppointmentWarning = { code: 'RESPONSIBLE_USER_OVERLAP'; appointmentI
 type AgencyTeamMember = { userId: string; fullName: string; email: string; role: 'admin' | 'collaborator'; joinedAt: string }
 
 type AgencyApplicantDetailApi = {
-  application: { id: string; responsibleUserId: string | null; status: 'new' | 'preselected' | 'selected' | 'rejected' | 'withdrawn'; documentState: 'complete' | 'missing' | 'not_requested'; submittedAt: string | null; draftData: Record<string, unknown> }
+  application: { id: string; responsibleUserId: string | null; status: 'new' | 'preselected' | 'selected' | 'rejected' | 'withdrawn'; documentState: 'complete' | 'missing' | 'not_requested'; submittedAt: string | null; draftData: Record<string, unknown>; adultProfiles: Array<{ id: string; isPrimary: boolean; fullName: string; email: string | null; phone: string | null; employmentStatus: string; employerOrActivity: string; contractType: string; netMonthlyIncomeCents: number }> }
   applicant: { fullName: string; email: string } | null
   responsibleUser: { id: string; fullName: string } | null
   property: { id: string; internalReference: string; title: string; address: string | null; city: string }
-  documents: Array<{ id: string; category: string; originalName: string; createdAt: string }>
+  documents: Array<{ id: string; adultProfileId: string; category: string; originalName: string; createdAt: string }>
+  possibleDuplicate: { matchedOn: Array<'email' | 'phone'>; applicationIds: string[] } | null
   notes: Array<{ note: { id: string; body: string; createdAt: string }; authorName: string }>
   appointments: Array<{ id: string; startsAt: string; durationMinutes: number; state: AgencyAppointmentApi['state'] }>
   activity: Array<{ id: string; type: string; createdAt: string; metadata: Record<string, unknown> }>
@@ -236,9 +240,11 @@ type AgencyApplicationListItem = {
   tenantEmail: string
   responsibleUserName: string | null
   nextViewing: { startsAt: string } | null
+  possibleDuplicate: { matchedOn: Array<'email' | 'phone'>; applicationIds: string[] } | null
 }
 
 type RemoteLoadState = 'loading' | 'loaded' | 'error'
+type PaginationMetadata = { page: number; pageSize: number; total: number; totalPages: number; hasMore: boolean }
 
 const properties: Property[] = [
   { id: 1, reference: 'MAD-042', title: 'Piso luminoso en Chamberí', address: 'Calle de Galileo, 41', city: 'Madrid', rent: 1450, rooms: 2, applicants: 24, newApplicants: 7, status: 'Publicado', nextViewing: 'Hoy, 18:00', accent: 'coral', publicUrl: 'https://inquilink.es/solicitud/mad-042-9vp3k2' },
@@ -408,6 +414,21 @@ async function agencyResponseError(response: Response) {
   return agencyRequestError(response)
 }
 
+async function fetchAllAgencyTeamMembers(signal?: AbortSignal): Promise<AgencyTeamMember[]> {
+  const members: AgencyTeamMember[] = []
+  let page = 1
+  let hasMore = true
+  while (hasMore) {
+    const response = await fetch(`/api/v1/agency/team?page=${page}&pageSize=100`, { credentials: 'include', headers: { Accept: 'application/json' }, signal })
+    if (!response.ok) throw new Error(agencyRequestError(response))
+    const payload = await response.json() as { data?: { members?: AgencyTeamMember[]; pagination?: PaginationMetadata } }
+    members.push(...(payload.data?.members ?? []))
+    hasMore = payload.data?.pagination?.hasMore ?? false
+    page += 1
+  }
+  return members
+}
+
 function isSessionError(message: string) {
   return message.toLowerCase().includes('sesión')
 }
@@ -456,7 +477,7 @@ function yesNoCopy(value: unknown) {
 }
 
 function documentCategoryCopy(value: unknown) {
-  return ({ payslips: 'Nóminas', employment_contract: 'Contrato de trabajo', self_employed_income: 'Ingresos de autónomo', supporting: 'Documentación adicional' } as Record<string, string>)[String(value)] ?? detailValue(value)
+  return ({ payslips: 'Nóminas', employment_contract: 'Contrato de trabajo', self_employed_income: 'Ingresos de autónomo', irpf_tax_return: 'Declaración de la renta (IRPF)', employment_history: 'Vida laboral', pension_proof: 'Justificante de pensión', guarantor_proof: 'Documentación del avalista', supporting: 'Documentación adicional' } as Record<string, string>)[String(value)] ?? detailValue(value)
 }
 
 function applicationText(item: AgencyApplicationListItem, key: string) {
@@ -596,6 +617,7 @@ export function AgencyWorkspacePage() {
   const [appointmentApplicantId, setAppointmentApplicantId] = useState<number | null>(null)
   const [editingAppointmentId, setEditingAppointmentId] = useState<number | null>(null)
   const [propertyEditorId, setPropertyEditorId] = useState<number | 'new' | null>(null)
+  const [remotePropertyEditor, setRemotePropertyEditor] = useState<'new' | AgencyPropertyApi | null>(null)
   const [appointmentTab, setAppointmentTab] = useState<'Próximas' | 'Anteriores'>('Próximas')
   const [focusedAppointmentId, setFocusedAppointmentId] = useState<number | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -858,7 +880,7 @@ export function AgencyWorkspacePage() {
     window.setTimeout(() => setToast(''), 2200)
   }
 
-  const createDraftProperty = () => setPropertyEditorId('new')
+  const createDraftProperty = () => dashboardLoadState === 'remote' ? setRemotePropertyEditor('new') : setPropertyEditorId('new')
 
   const saveProperty = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -942,6 +964,7 @@ export function AgencyWorkspacePage() {
           <button className={`agency-nav-item ${view === 'settings' ? 'agency-nav-item--active' : ''}`} onClick={() => navigate('settings')}><Gear size={19} />Configuración</button>
           <button className={`agency-nav-item ${view === 'team' ? 'agency-nav-item--active' : ''}`} onClick={() => navigate('team')}><Users size={19} />Equipo</button>
           <button className={`agency-nav-item ${view === 'billing' ? 'agency-nav-item--active' : ''}`} onClick={() => navigate('billing')}><CreditCard size={19} />Facturación</button>
+          <WorkspaceLogoutButton />
         </nav>
         <button className="agency-profile-mini">
           <span className="agency-profile-mini__avatar">{userInitials}</span>
@@ -967,7 +990,7 @@ export function AgencyWorkspacePage() {
           {view === 'panel' && <DashboardView userFirstName={userFirstName} properties={workspaceProperties} appointments={appointments} applicants={applicants} dashboardData={dashboardData} loadState={dashboardLoadState} loadError={dashboardLoadError} onRetry={() => setDashboardReloadKey((key) => key + 1)} onNewProperty={createDraftProperty} onOpenProperties={() => { clearNewApplicantPropertyFilter(); navigate('properties') }} onOpenProperty={openProperty} onOpenApplicant={openApplicantFromDashboard} onOpenNewApplicants={openNewApplicants} onOpenAppointment={openAppointmentFromDashboard} onOpenAppointments={() => { setFocusedAppointmentId(null); setAppointmentTab('Próximas'); navigate('appointments', '/app/citas?vista=proximas') }} />}
           {view === 'linkedApplicant' && <LinkedDashboardRecordView route={linkedRouteFromPath(window.location.pathname)} loadState={dashboardLoadState} loadError={dashboardLoadError} properties={workspaceProperties} applicants={applicants} appointments={appointments} onDashboardInvalidated={() => setDashboardReloadKey((key) => key + 1)} onBack={() => navigate('panel')} />}
           {view === 'linkedAppointment' && <LinkedDashboardRecordView route={linkedRouteFromPath(window.location.pathname)} loadState={dashboardLoadState} loadError={dashboardLoadError} properties={workspaceProperties} applicants={applicants} appointments={appointments} onDashboardInvalidated={() => setDashboardReloadKey((key) => key + 1)} onBack={() => navigate('panel')} />}
-          {view === 'properties' && dashboardLoadState === 'remote' && <AuthenticatedPropertiesView onlyWithNewApplicants={onlyPropertiesWithNewApplicants} onClearNewApplicants={clearNewApplicantPropertyFilter} onOpen={openRemoteProperty} />}
+          {view === 'properties' && dashboardLoadState === 'remote' && <AuthenticatedPropertiesView onlyWithNewApplicants={onlyPropertiesWithNewApplicants} onClearNewApplicants={clearNewApplicantPropertyFilter} onOpen={openRemoteProperty} onNew={() => setRemotePropertyEditor('new')} onEdit={setRemotePropertyEditor} />}
           {view === 'properties' && dashboardLoadState === 'demo' && (
             <PropertiesView
               filteredProperties={filteredProperties}
@@ -985,7 +1008,7 @@ export function AgencyWorkspacePage() {
             />
           )}
           {view === 'properties' && (dashboardLoadState === 'loading' || dashboardLoadState === 'error') && <AgencyDestinationGate title="Mis anuncios" loadState={dashboardLoadState} loadError={dashboardLoadError} onRetry={() => setDashboardReloadKey((key) => key + 1)} />}
-          {view === 'property' && dashboardLoadState === 'remote' && remotePropertyId && <AuthenticatedPropertyView propertyId={remotePropertyId} onBack={() => navigate('properties')} />}
+          {view === 'property' && dashboardLoadState === 'remote' && remotePropertyId && <AuthenticatedPropertyView propertyId={remotePropertyId} onBack={() => navigate('properties')} onEdit={setRemotePropertyEditor} />}
           {view === 'property' && dashboardLoadState === 'demo' && (
             <PropertyView
               property={selectedProperty}
@@ -1031,9 +1054,9 @@ export function AgencyWorkspacePage() {
             />
           )}
           {view === 'appointments' && (dashboardLoadState === 'loading' || dashboardLoadState === 'error') && <AgencyDestinationGate title="Citas" loadState={dashboardLoadState} loadError={dashboardLoadError} onRetry={() => setDashboardReloadKey((key) => key + 1)} />}
-          {view === 'team' && <TeamView />}
+          {view === 'team' && <TeamView remote={dashboardLoadState === 'remote'} canInvite={identity?.agency?.role === 'admin'} />}
           {view === 'settings' && <SimpleSettingsView />}
-          {view === 'billing' && <BillingView />}
+          {view === 'billing' && <BillingView remote={dashboardLoadState === 'remote'} />}
         </main>
       </div>
 
@@ -1054,6 +1077,20 @@ export function AgencyWorkspacePage() {
         <AppointmentModal applicant={appointmentApplicant} property={workspaceProperties.find((property) => property.id === appointmentApplicant.propertyId) ?? selectedProperty} appointments={appointments} existing={appointments.find((appointment) => appointment.id === editingAppointmentId)} onClose={() => { setAppointmentApplicantId(null); setEditingAppointmentId(null) }} onSubmit={createAppointment} />
       )}
       {propertyEditorId !== null && <PropertyEditorModal property={typeof propertyEditorId === 'number' ? workspaceProperties.find((property) => property.id === propertyEditorId) : undefined} suggestedReference={`MAD-${String(workspaceProperties.length + 52).padStart(3, '0')}`} onClose={() => setPropertyEditorId(null)} onSubmit={saveProperty} />}
+      {remotePropertyEditor && <AuthenticatedPropertyEditorModal property={remotePropertyEditor === 'new' ? undefined : remotePropertyEditor} onClose={() => setRemotePropertyEditor(null)} onSaved={(saved, publicLink) => {
+        setRemotePropertyEditor(null)
+        setDashboardReloadKey((key) => key + 1)
+        setRemotePropertyId(saved.property.id)
+        navigate('property', `/app/anuncios/${encodeURIComponent(saved.property.id)}`)
+        if (publicLink) {
+          void navigator.clipboard.writeText(publicLink)
+            .then(() => setToast('Anuncio publicado. Enlace copiado.'))
+            .catch(() => setToast('Anuncio publicado. Puedes copiar el enlace desde su ficha.'))
+        } else {
+          setToast('Anuncio guardado.')
+        }
+        window.setTimeout(() => setToast(''), 2600)
+      }} />}
       {toast && <div className="agency-toast" role="status"><CheckCircle size={19} weight="fill" />{toast}</div>}
     </div>
   )
@@ -1124,7 +1161,7 @@ function DashboardView({ userFirstName, properties, appointments, applicants, da
 
   return (
     <section className="agency-view agency-dashboard">
-      <PageHeading title={`Buenos días, ${userFirstName}`} description="Aquí tienes lo importante para mover tus alquileres hoy." actions={isDemo ? <button className="agency-button agency-button--primary" onClick={onNewProperty}><Plus size={18} weight="bold" />Nuevo anuncio</button> : remote ? <a className="agency-button agency-button--primary" href="/app/anuncios">Gestionar anuncios <ArrowRight size={18} weight="bold" /></a> : undefined} />
+      <PageHeading title={`Buenos días, ${userFirstName}`} description="Aquí tienes lo importante para mover tus alquileres hoy." actions={isDemo || remote ? <button className="agency-button agency-button--primary" onClick={onNewProperty}><Plus size={18} weight="bold" />Nuevo anuncio</button> : undefined} />
       <div className="agency-dashboard-focus">
         <section className="agency-panel-card agency-new-applicants-card">
           <div className="agency-card-heading">
@@ -1270,10 +1307,7 @@ function LinkedDashboardRecordView({ route, loadState, loadError, properties, ap
     const controller = new AbortController()
     const loadTeam = async () => {
       try {
-        const response = await fetch('/api/v1/agency/team', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
-        if (!response.ok) return
-        const payload = await response.json() as { data?: { members?: AgencyTeamMember[] } }
-        setTeamMembers(payload.data?.members ?? [])
+        setTeamMembers(await fetchAllAgencyTeamMembers(controller.signal))
       } catch { /* The appointment detail remains usable if the team list cannot be loaded. */ }
     }
     void loadTeam()
@@ -1380,10 +1414,12 @@ function LinkedDashboardRecordView({ route, loadState, loadError, properties, ap
       const details = remoteApplicant.application.draftData
       return <section className="agency-view agency-linked-record"><button className="agency-back" onClick={onBack}><ArrowLeft size={17} />Panel</button><PageHeading eyebrow="INTERESADO" title={name} description={`${remoteApplicant.property.internalReference} · ${propertyTitle}`} actions={<label className="agency-select"><span className="agency-sr-only">Cambiar estado</span><select value={remoteApplicant.application.status} disabled={mutating || remoteApplicant.application.status === 'withdrawn'} onChange={(event) => void changeRemoteApplicantStatus(event.target.value as 'new' | 'preselected' | 'selected' | 'rejected')}><option value="new">Nuevo</option><option value="preselected">Preseleccionado</option><option value="selected">Seleccionado</option><option value="rejected">Descartado</option>{remoteApplicant.application.status === 'withdrawn' && <option value="withdrawn">Retirado</option>}</select><CaretDown size={14} /></label>} />
         {mutationError && <p className="agency-inline-error" role="alert">{mutationError}</p>}
+        {remoteApplicant.possibleDuplicate && <div className="agency-duplicate-note" role="status"><Warning size={18} weight="fill" /><span><strong>Posible solicitud duplicada</strong><small>Coincide por {remoteApplicant.possibleDuplicate.matchedOn.map((value) => value === 'email' ? 'correo' : 'teléfono').join(' y ')} con {remoteApplicant.possibleDuplicate.applicationIds.length} solicitud(es) de este anuncio. Revísalas por separado; no se han fusionado ni descartado.</small></span></div>}
         <div className="agency-linked-detail-grid"><section className="agency-panel-card"><h2>Resumen</h2><dl><div><dt>Solicitud recibida</dt><dd>{submitted}</dd></div><div><dt>Estado</dt><dd><StatusBadge status={statusLabel[remoteApplicant.application.status]} /></dd></div><div><dt>Documentación</dt><dd><StatusBadge status={documentLabel[remoteApplicant.application.documentState]} /></dd></div><div><dt>Responsable</dt><dd>{remoteApplicant.responsibleUser?.fullName ?? 'Sin asignar'}</dd></div><div><dt>Correo</dt><dd>{remoteApplicant.applicant?.email ?? 'No disponible'}</dd></div><div><dt>Ubicación</dt><dd>{remoteApplicant.property.address ? `${remoteApplicant.property.address}, ` : ''}{remoteApplicant.property.city}</dd></div></dl></section>
           <section className="agency-panel-card"><h2>Solicitud</h2><dl><div><dt>Teléfono</dt><dd>{formatPhoneDisplay(typeof details.phone === 'string' ? details.phone : null)}</dd></div><div><dt>Contacto preferido</dt><dd>{contactChannelCopy(details.preferredContactChannel)}</dd></div><div><dt>Adultos / menores</dt><dd>{detailValue(details.adultOccupants)} / {detailValue(details.minorOccupants)}</dd></div><div><dt>Entrada prevista</dt><dd>{detailValue(details.intendedMoveInDate)}</dd></div><div><dt>Situación laboral</dt><dd>{detailValue(details.employmentStatus)}</dd></div><div><dt>Contrato</dt><dd>{detailValue(details.contractType)}</dd></div><div><dt>Actividad o empresa</dt><dd>{detailValue(details.employerOrActivity)}</dd></div><div><dt>Ingresos individuales</dt><dd>{typeof details.individualNetMonthlyIncomeCents === 'number' ? formatMoney(details.individualNetMonthlyIncomeCents / 100) : 'No indicado'}</dd></div><div><dt>Ingresos del hogar</dt><dd>{typeof details.householdNetMonthlyIncomeCents === 'number' ? formatMoney(details.householdNetMonthlyIncomeCents / 100) : 'No indicado'}</dd></div><div><dt>Mascotas</dt><dd>{yesNoCopy(details.pets)}</dd></div><div><dt>Detalles de mascotas</dt><dd>{detailValue(details.petDetails)}</dd></div><div><dt>Avalista</dt><dd>{yesNoCopy(details.guarantorAvailability)}</dd></div><div><dt>Disponibilidad</dt><dd>{detailValue(details.viewingAvailability)}</dd></div><div><dt>Nota de disponibilidad</dt><dd>{detailValue(details.availabilityNote)}</dd></div><div><dt>Mensaje</dt><dd>{detailValue(details.message)}</dd></div><div><dt>Consentimiento comercial</dt><dd>{detailValue(details.marketingConsent)}</dd></div></dl></section>
-          <section className="agency-panel-card"><h2>Documentos</h2>{remoteApplicant.documents.length ? <ul className="agency-linked-list">{remoteApplicant.documents.map((document) => <li key={document.id}><span><strong>{document.originalName}</strong><small>{documentCategoryCopy(document.category)}</small></span><button className="agency-text-button" disabled={documentOpeningId === document.id} onClick={() => void openSecureDocument(document.id, document.originalName)}>{documentOpeningId === document.id ? 'Abriendo...' : 'Abrir'} <ArrowRight size={15} /></button></li>)}</ul> : <p className="agency-muted-copy">No hay documentos disponibles.</p>}</section>
-          <section className="agency-panel-card"><h2>Notas internas</h2>{remoteApplicant.notes.length ? <ul className="agency-linked-list">{remoteApplicant.notes.map((item) => <li key={item.note.id}><span><strong>{item.authorName}</strong><small>{item.note.body} · {apiRelativeDateTime(item.note.createdAt)}</small></span></li>)}</ul> : <p className="agency-muted-copy">Todavía no hay notas internas.</p>}</section>
+          <section className="agency-panel-card"><h2>Personas adultas</h2><ul className="agency-linked-list">{remoteApplicant.application.adultProfiles.map((adult) => <li key={adult.id}><span><strong>{adult.fullName}{adult.isPrimary ? ' · solicitante principal' : ''}</strong><small>{adult.employmentStatus} · {adult.contractType} · {formatMoney(adult.netMonthlyIncomeCents / 100)}{adult.email ? ` · ${adult.email}` : ''}</small></span></li>)}</ul></section>
+          <section className="agency-panel-card"><h2>Documentos</h2>{remoteApplicant.documents.length ? <ul className="agency-linked-list">{remoteApplicant.documents.map((document) => { const owner = remoteApplicant.application.adultProfiles.find((adult) => adult.id === document.adultProfileId); return <li key={document.id}><span><strong>{document.originalName}</strong><small>{documentCategoryCopy(document.category)} · {owner?.fullName ?? 'Solicitante principal'}</small></span><button className="agency-text-button" disabled={documentOpeningId === document.id} onClick={() => void openSecureDocument(document.id, document.originalName)}>{documentOpeningId === document.id ? 'Abriendo...' : 'Abrir'} <ArrowRight size={15} /></button></li> })}</ul> : <p className="agency-muted-copy">No hay documentos disponibles.</p>}</section>
+          <section className="agency-panel-card"><ApplicantCollaborationControls applicationId={remoteApplicant.application.id} initialResponsibleUserId={remoteApplicant.application.responsibleUserId} initialNotes={remoteApplicant.notes} onResponsibleChanged={(responsibleUser) => setRemoteRecord((current) => current && 'application' in current ? { ...current, responsibleUser, application: { ...current.application, responsibleUserId: responsibleUser?.id ?? null } } : current)} /></section>
           <section className="agency-panel-card"><h2>Historial de citas</h2>{remoteApplicant.appointments.length ? <ul className="agency-linked-list">{remoteApplicant.appointments.map((appointment) => <li key={appointment.id}><span><strong>{apiRelativeDateTime(appointment.startsAt)}</strong><small>{appointment.durationMinutes} min · {appointmentStateCopy(appointment.state)}</small></span><a className="agency-text-button" href={`/app/citas/${encodeURIComponent(appointment.id)}`}>Abrir <ArrowRight size={15} /></a></li>)}</ul> : <p className="agency-muted-copy">No hay citas registradas.</p>}</section>
           <section className="agency-panel-card"><h2>Actividad</h2>{remoteApplicant.activity.length ? <ul className="agency-linked-list">{remoteApplicant.activity.map((event) => <li key={event.id}><span><strong>{activityCopy(event)}</strong><small>{apiRelativeDateTime(event.createdAt)}</small></span></li>)}</ul> : <p className="agency-muted-copy">Todavía no hay actividad registrada.</p>}</section>
         </div></section>
@@ -1405,8 +1441,10 @@ function AgencyDestinationGate({ title, loadState, loadError, onRetry }: { title
   return <section className="agency-view"><PageHeading title={title} description={loadState === 'loading' ? 'Estamos preparando tu espacio de trabajo.' : loadError} /><DashboardLoadMessage message={loadState === 'loading' ? 'Cargando información...' : loadError} error={loadState === 'error'} loginRequired={isSessionError(loadError)} onRetry={onRetry} /></section>
 }
 
-function AuthenticatedPropertiesView({ onlyWithNewApplicants, onClearNewApplicants, onOpen }: { onlyWithNewApplicants: boolean; onClearNewApplicants: () => void; onOpen: (id: string) => void }) {
+function AuthenticatedPropertiesView({ onlyWithNewApplicants, onClearNewApplicants, onOpen, onNew, onEdit }: { onlyWithNewApplicants: boolean; onClearNewApplicants: () => void; onOpen: (id: string) => void; onNew: () => void; onEdit: (property: AgencyPropertyApi) => void }) {
   const [records, setRecords] = useState<AgencyPropertyApi[]>([])
+  const [pagination, setPagination] = useState<PaginationMetadata | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [query, setQuery] = useState('')
   const [state, setState] = useState<'all' | AgencyPropertyApi['property']['state']>('all')
   const [loadState, setLoadState] = useState<RemoteLoadState>('loading')
@@ -1414,16 +1452,26 @@ function AuthenticatedPropertiesView({ onlyWithNewApplicants, onClearNewApplican
   const [rowError, setRowError] = useState('')
   const [copiedPropertyId, setCopiedPropertyId] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  const requestScope = JSON.stringify([query, state, onlyWithNewApplicants, reloadKey])
+  const requestScopeRef = useRef(requestScope)
+  requestScopeRef.current = requestScope
   useEffect(() => {
     const controller = new AbortController()
     const load = async () => {
+      setLoadingMore(false)
+      setRowError('')
       setLoadState('loading')
       setError('')
       try {
-        const response = await fetch('/api/v1/agency/properties', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
+        const parameters = new URLSearchParams({ page: '1', pageSize: '25' })
+        if (query.trim()) parameters.set('search', query.trim())
+        if (state !== 'all') parameters.set('state', state)
+        if (onlyWithNewApplicants) parameters.set('hasRecentNewApplicants', 'true')
+        const response = await fetch(`/api/v1/agency/properties?${parameters}`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
         if (!response.ok) throw new Error(agencyRequestError(response))
-        const payload = await response.json() as { data?: { properties?: AgencyPropertyApi[] } }
+        const payload = await response.json() as { data?: { properties?: AgencyPropertyApi[]; pagination?: PaginationMetadata } }
         setRecords(payload.data?.properties ?? [])
+        setPagination(payload.data?.pagination ?? null)
         setLoadState('loaded')
       } catch (caught) {
         if (controller.signal.aborted) return
@@ -1433,7 +1481,27 @@ function AuthenticatedPropertiesView({ onlyWithNewApplicants, onClearNewApplican
     }
     void load()
     return () => controller.abort()
-  }, [reloadKey])
+  }, [onlyWithNewApplicants, query, reloadKey, state])
+  const loadMore = async () => {
+    if (!pagination?.hasMore || loadingMore) return
+    const requestedScope = requestScopeRef.current
+    setLoadingMore(true); setRowError('')
+    try {
+      const parameters = new URLSearchParams({ page: String(pagination.page + 1), pageSize: String(pagination.pageSize) })
+      if (query.trim()) parameters.set('search', query.trim())
+      if (state !== 'all') parameters.set('state', state)
+      if (onlyWithNewApplicants) parameters.set('hasRecentNewApplicants', 'true')
+      const response = await fetch(`/api/v1/agency/properties?${parameters}`, { credentials: 'include', headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error(await agencyResponseError(response))
+      const payload = await response.json() as { data?: { properties?: AgencyPropertyApi[]; pagination?: PaginationMetadata } }
+      if (requestScopeRef.current !== requestedScope) return
+      setRecords((current) => [...current, ...(payload.data?.properties ?? [])]); setPagination(payload.data?.pagination ?? null)
+    } catch (caught) {
+      if (requestScopeRef.current === requestedScope) setRowError(caught instanceof Error ? caught.message : 'No hemos podido cargar más anuncios.')
+    } finally {
+      if (requestScopeRef.current === requestedScope) setLoadingMore(false)
+    }
+  }
   const visible = records.filter((record) => {
     const searchValue = `${record.property.title} ${record.property.address ?? ''} ${record.property.internalReference}`.toLowerCase()
     return (!query.trim() || searchValue.includes(query.trim().toLowerCase())) && (state === 'all' || record.property.state === state) && (!onlyWithNewApplicants || record.recentNewApplicantCount > 0)
@@ -1454,24 +1522,26 @@ function AuthenticatedPropertiesView({ onlyWithNewApplicants, onClearNewApplican
     }
   }
   return <section className="agency-view">
-    <PageHeading eyebrow="ANUNCIOS DE LA AGENCIA" title="Mis anuncios" description="Gestiona cada inmueble y a todas las personas interesadas desde un mismo lugar." />
+    <PageHeading eyebrow="ANUNCIOS DE LA AGENCIA" title="Mis anuncios" description="Gestiona cada inmueble y a todas las personas interesadas desde un mismo lugar." actions={<button className="agency-button agency-button--primary" onClick={onNew}><Plus size={18} weight="bold" />Nuevo anuncio</button>} />
     <div className="agency-toolbar"><label className="agency-search"><MagnifyingGlass size={18} /><span className="agency-sr-only">Buscar anuncios</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por título, dirección o referencia" /></label><label className="agency-select"><SlidersHorizontal size={17} /><span className="agency-sr-only">Filtrar por estado</span><select value={state} onChange={(event) => setState(event.target.value as typeof state)}><option value="all">Todos</option><option value="published">Publicado</option><option value="draft">Borrador</option><option value="paused">Pausado</option><option value="archived">Archivado</option></select><CaretDown size={14} /></label></div>
     {onlyWithNewApplicants && <div className="agency-filter-summary"><Funnel size={15} /><span>Anuncios con interesados nuevos en los últimos 30 días</span><button onClick={onClearNewApplicants}>Quitar filtro <X size={13} /></button></div>}
     {rowError && <p className="agency-inline-error" role="alert">{rowError}</p>}
-    {loadState === 'loading' ? <DashboardLoadMessage message="Cargando anuncios..." /> : loadState === 'error' ? <DashboardLoadMessage message={error} error loginRequired={isSessionError(error)} onRetry={() => setReloadKey((key) => key + 1)} /> : visible.length ? <div className="agency-property-list agency-property-list--authenticated">{visible.map((record) => <article className="agency-property-row" key={record.property.id}>
+    {loadState === 'loading' ? <DashboardLoadMessage message="Cargando anuncios..." /> : loadState === 'error' ? <DashboardLoadMessage message={error} error loginRequired={isSessionError(error)} onRetry={() => setReloadKey((key) => key + 1)} /> : visible.length ? <><div className="agency-property-list agency-property-list--authenticated">{visible.map((record) => <article className="agency-property-row" key={record.property.id}>
       {record.property.coverImageUrl ? <img className="agency-property-api-cover" src={record.property.coverImageUrl} alt="" /> : <div className="agency-property-visual agency-property-visual--blue" aria-hidden="true"><HouseLine size={25} weight="duotone" /></div>}
       <div className="agency-property-row__identity"><small>{record.property.internalReference}</small><button className="agency-property-row__title" onClick={() => onOpen(record.property.id)}>{record.property.title}</button><em><MapPin size={14} />{record.property.address ? `${record.property.address}, ` : ''}{record.property.city}</em></div>
       <div className="agency-property-row__price"><strong>{formatMoney(record.property.monthlyRentCents / 100)}</strong><small>al mes{record.property.bedrooms === null ? '' : ` · ${record.property.bedrooms} hab.`}</small></div>
       <div className="agency-property-row__interest"><strong>{record.applicantCount}</strong><small>interesados</small>{record.recentNewApplicantCount > 0 && <span>{record.recentNewApplicantCount} nuevos</span>}</div>
       <div className="agency-property-row__next"><small>Próxima visita</small><strong>{record.nextViewing ? apiRelativeDateTime(record.nextViewing.startsAt) : 'Sin visitas'}</strong></div><StatusBadge status={stateLabel[record.property.state]} />
-      <div className="agency-row-actions"><button className="agency-icon-button agency-icon-button--border" disabled={record.property.state !== 'published'} title={record.property.state === 'published' ? 'Copiar enlace público' : 'Publica el anuncio para compartir su enlace'} onClick={() => void copyPropertyLink(record)} aria-label={`Copiar enlace de ${record.property.title}`}>{copiedPropertyId === record.property.id ? <Check size={18} weight="bold" /> : <LinkSimple size={18} />}</button><button className="agency-icon-button agency-icon-button--border" onClick={() => onOpen(record.property.id)} aria-label={`Abrir la ficha de ${record.property.title}`} title="Abrir ficha"><NotePencil size={18} /></button></div>
-    </article>)}</div> : <EmptyState title="No hay anuncios que coincidan" description="Prueba con otra búsqueda o elimina los filtros activos." action="Limpiar filtros" onAction={() => { setQuery(''); setState('all'); onClearNewApplicants() }} />}
+      <div className="agency-row-actions"><button className="agency-icon-button agency-icon-button--border" disabled={record.property.state !== 'published'} title={record.property.state === 'published' ? 'Copiar enlace público' : 'Publica el anuncio para compartir su enlace'} onClick={() => void copyPropertyLink(record)} aria-label={`Copiar enlace de ${record.property.title}`}>{copiedPropertyId === record.property.id ? <Check size={18} weight="bold" /> : <LinkSimple size={18} />}</button><button className="agency-icon-button agency-icon-button--border" onClick={() => onEdit(record)} aria-label={`Editar ${record.property.title}`} title="Editar anuncio"><NotePencil size={18} /></button><button className="agency-icon-button" onClick={() => onOpen(record.property.id)} aria-label={`Abrir la ficha de ${record.property.title}`} title="Abrir ficha"><ArrowRight size={18} /></button></div>
+    </article>)}</div>{pagination?.hasMore && <button className="agency-button agency-button--secondary" type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Cargando…' : `Cargar más anuncios (${records.length} de ${pagination.total})`}</button>}</> : <EmptyState title="No hay anuncios que coincidan" description="Prueba con otra búsqueda o elimina los filtros activos." action="Limpiar filtros" onAction={() => { setQuery(''); setState('all'); onClearNewApplicants() }} />}
   </section>
 }
 
-function AuthenticatedPropertyView({ propertyId, onBack }: { propertyId: string; onBack: () => void }) {
+function AuthenticatedPropertyView({ propertyId, onBack, onEdit }: { propertyId: string; onBack: () => void; onEdit: (property: AgencyPropertyApi) => void }) {
   const [property, setProperty] = useState<AgencyPropertyApi | null>(null)
   const [applications, setApplications] = useState<AgencyApplicationListItem[]>([])
+  const [applicationsPagination, setApplicationsPagination] = useState<PaginationMetadata | null>(null)
+  const [loadingMoreApplications, setLoadingMoreApplications] = useState(false)
   const [teamMembers, setTeamMembers] = useState<AgencyTeamMember[]>([])
   const [query, setQuery] = useState('')
   const [applicantStatus, setApplicantStatus] = useState<'all' | AgencyApplicantDetailApi['application']['status']>('all')
@@ -1487,28 +1557,46 @@ function AuthenticatedPropertyView({ propertyId, onBack }: { propertyId: string;
   const [scheduling, setScheduling] = useState<AgencyApplicationListItem | null>(null)
   const [copied, setCopied] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
+  const requestScope = JSON.stringify([propertyId, query, applicantStatus, documentStatus, viewingStatus, submittedFilter, assigneeFilter, sort, reloadKey])
+  const requestScopeRef = useRef(requestScope)
+  requestScopeRef.current = requestScope
+  const applicationParameters = (page: number, pageSize = 25) => {
+    const parameters = new URLSearchParams({ page: String(page), pageSize: String(pageSize), sort })
+    if (query.trim()) parameters.set('search', query.trim())
+    if (applicantStatus !== 'all') parameters.set('status', applicantStatus)
+    if (documentStatus !== 'all') parameters.set('documentState', documentStatus)
+    if (viewingStatus !== 'all') parameters.set('viewingState', viewingStatus)
+    if (assigneeFilter === 'unassigned') parameters.set('responsibility', 'unassigned')
+    else if (assigneeFilter !== 'all') parameters.set('responsibleUserId', assigneeFilter)
+    if (submittedFilter !== 'all') {
+      const from = submittedFilter === 'today' ? new Date(new Date().setHours(0, 0, 0, 0)) : new Date(Date.now() - 7 * dayInMilliseconds)
+      parameters.set('submittedFrom', from.toISOString())
+    }
+    return parameters
+  }
   useEffect(() => {
     const controller = new AbortController()
     const load = async () => {
+      setLoadingMoreApplications(false)
+      setActionError('')
       setLoadState('loading')
       setError('')
       try {
-        const [propertyResponse, applicationsResponse, teamResponse] = await Promise.all([
-          fetch('/api/v1/agency/properties', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal }),
-          fetch(`/api/v1/agency/properties/${encodeURIComponent(propertyId)}/applications`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal }),
-          fetch('/api/v1/agency/team', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal }),
+        const [propertyResponse, applicationsResponse, loadedTeamMembers] = await Promise.all([
+          fetch(`/api/v1/agency/properties?propertyId=${encodeURIComponent(propertyId)}&pageSize=1`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal }),
+          fetch(`/api/v1/agency/properties/${encodeURIComponent(propertyId)}/applications?${applicationParameters(1)}`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal }),
+          fetchAllAgencyTeamMembers(controller.signal),
         ])
         if (!propertyResponse.ok) throw new Error(agencyRequestError(propertyResponse))
         if (!applicationsResponse.ok) throw new Error(agencyRequestError(applicationsResponse))
-        if (!teamResponse.ok) throw new Error(agencyRequestError(teamResponse))
         const propertyPayload = await propertyResponse.json() as { data?: { properties?: AgencyPropertyApi[] } }
-        const applicationsPayload = await applicationsResponse.json() as { data?: { applications?: AgencyApplicationListItem[] } }
-        const teamPayload = await teamResponse.json() as { data?: { members?: AgencyTeamMember[] } }
+        const applicationsPayload = await applicationsResponse.json() as { data?: { applications?: AgencyApplicationListItem[]; pagination?: PaginationMetadata } }
         const selected = propertyPayload.data?.properties?.find((record) => record.property.id === propertyId)
         if (!selected) throw new Error('No se ha encontrado el anuncio solicitado.')
         setProperty(selected)
         setApplications(applicationsPayload.data?.applications ?? [])
-        setTeamMembers(teamPayload.data?.members ?? [])
+        setApplicationsPagination(applicationsPayload.data?.pagination ?? null)
+        setTeamMembers(loadedTeamMembers)
         setLoadState('loaded')
       } catch (caught) {
         if (controller.signal.aborted) return
@@ -1518,14 +1606,30 @@ function AuthenticatedPropertyView({ propertyId, onBack }: { propertyId: string;
     }
     void load()
     return () => controller.abort()
-  }, [propertyId, reloadKey])
+  }, [applicantStatus, assigneeFilter, documentStatus, propertyId, query, reloadKey, sort, submittedFilter, viewingStatus])
+  const loadMoreApplications = async () => {
+    if (!applicationsPagination?.hasMore || loadingMoreApplications) return
+    const requestedScope = requestScopeRef.current
+    setLoadingMoreApplications(true); setActionError('')
+    try {
+      const response = await fetch(`/api/v1/agency/properties/${encodeURIComponent(propertyId)}/applications?${applicationParameters(applicationsPagination.page + 1, applicationsPagination.pageSize)}`, { credentials: 'include', headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error(await agencyResponseError(response))
+      const payload = await response.json() as { data?: { applications?: AgencyApplicationListItem[]; pagination?: PaginationMetadata } }
+      if (requestScopeRef.current !== requestedScope) return
+      setApplications((current) => [...current, ...(payload.data?.applications ?? [])]); setApplicationsPagination(payload.data?.pagination ?? null)
+    } catch (caught) {
+      if (requestScopeRef.current === requestedScope) setActionError(caught instanceof Error ? caught.message : 'No hemos podido cargar más interesados.')
+    } finally {
+      if (requestScopeRef.current === requestedScope) setLoadingMoreApplications(false)
+    }
+  }
   if (loadState === 'loading') return <section className="agency-view"><PageHeading title="Cargando anuncio" description="Estamos recuperando sus interesados." /><DashboardLoadMessage message="Cargando información..." /></section>
   if (loadState === 'error' || !property) return <section className="agency-view"><PageHeading title="No se ha podido abrir el anuncio" description={error} /><DashboardLoadMessage message={error} error loginRequired={isSessionError(error)} onRetry={() => setReloadKey((key) => key + 1)} /></section>
   const applicantStatusLabel: Record<AgencyApplicantDetailApi['application']['status'], ApplicantStatus> = { new: 'Nuevo', preselected: 'Preseleccionado', selected: 'Seleccionado', rejected: 'Descartado', withdrawn: 'Retirado' }
   const documentStatusLabel: Record<AgencyApplicantDetailApi['application']['documentState'], DocumentStatus> = { complete: 'Completa', missing: 'Faltan documentos', not_requested: 'Sin solicitar' }
   const search = query.trim().toLowerCase()
   const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0)
-  const assignees = [...new Set(applications.map((item) => item.responsibleUserName).filter((name): name is string => Boolean(name)))]
+  const assignees = teamMembers.map((member) => member.userId)
   const visible = applications.filter((item) => {
     const phone = applicationText(item, 'phone') ?? ''
     const submittedAt = item.application.submittedAt ? new Date(item.application.submittedAt).getTime() : 0
@@ -1534,7 +1638,7 @@ function AuthenticatedPropertyView({ propertyId, onBack }: { propertyId: string;
     const matchesDocuments = documentStatus === 'all' || item.application.documentState === documentStatus
     const matchesViewing = viewingStatus === 'all' || (viewingStatus === 'scheduled' ? Boolean(item.nextViewing) : !item.nextViewing)
     const matchesDate = submittedFilter === 'all' || (submittedFilter === 'today' ? submittedAt >= startOfToday.getTime() : submittedAt >= Date.now() - 7 * dayInMilliseconds)
-    const matchesAssignee = assigneeFilter === 'all' || (assigneeFilter === 'unassigned' ? !item.responsibleUserName : item.responsibleUserName === assigneeFilter)
+    const matchesAssignee = assigneeFilter === 'all' || (assigneeFilter === 'unassigned' ? !item.application.responsibleUserId : item.application.responsibleUserId === assigneeFilter)
     return matchesSearch && matchesStatus && matchesDocuments && matchesViewing && matchesDate && matchesAssignee
   }).sort((left, right) => {
     if (sort === 'oldest') return new Date(left.application.submittedAt ?? 0).getTime() - new Date(right.application.submittedAt ?? 0).getTime()
@@ -1607,8 +1711,9 @@ function AuthenticatedPropertyView({ propertyId, onBack }: { propertyId: string;
       {property.property.coverImageUrl ? <img className="agency-property-api-cover" src={property.property.coverImageUrl} alt="" /> : <div className="agency-property-visual agency-property-visual--blue" aria-hidden="true"><HouseLine size={28} weight="duotone" /></div>}
       <div className="agency-property-header__identity"><div><span>{property.property.internalReference}</span><StatusBadge status={({ draft: 'Borrador', published: 'Publicado', paused: 'Pausado', archived: 'Archivado' } as const)[property.property.state]} /></div><h1>{property.property.title}</h1><p><MapPin size={15} />{property.property.address ? `${property.property.address}, ` : ''}{property.property.city} · {formatMoney(property.property.monthlyRentCents / 100)} / mes</p></div>
       <div className="agency-property-header__stats"><span><strong>{property.applicantCount}</strong><small>interesados</small></span><span><strong>{property.newApplicantCount}</strong><small>por revisar</small></span><span><strong>{property.recentNewApplicantCount}</strong><small>nuevos · 30 días</small></span></div>
-      <div className="agency-property-header__actions"><button className="agency-button agency-button--secondary" disabled={property.property.state !== 'published'} onClick={() => void copyPublicLink()}>{copied ? <Check size={18} weight="bold" /> : <Copy size={18} />}{copied ? 'Copiado' : 'Copiar enlace'}</button></div>
+      <div className="agency-property-header__actions"><button className="agency-icon-button agency-icon-button--border" onClick={() => onEdit(property)} aria-label="Editar anuncio"><NotePencil size={18} /></button><button className="agency-button agency-button--secondary" disabled={property.property.state !== 'published'} onClick={() => void copyPublicLink()}>{copied ? <Check size={18} weight="bold" /> : <Copy size={18} />}{copied ? 'Copiado' : 'Copiar enlace'}</button></div>
     </header>
+    <PropertyCoverUpload propertyId={property.property.id} currentUrl={property.property.coverImageUrl} onUploaded={({ coverImageUrl, version }) => setProperty((current) => current ? { ...current, property: { ...current.property, coverImageUrl, version } } : current)} />
     <div className="agency-section-heading"><div><h2>Interesados</h2><p>{visible.length} resultados visibles</p></div><button className="agency-button agency-button--secondary agency-button--compact" onClick={exportApplications}><DownloadSimple size={17} />Exportar</button></div>
     <div className="agency-applicant-toolbar">
       <label className="agency-search agency-search--applicants"><MagnifyingGlass size={18} /><span className="agency-sr-only">Buscar interesados</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Nombre, correo o teléfono" /></label>
@@ -1616,12 +1721,13 @@ function AuthenticatedPropertyView({ propertyId, onBack }: { propertyId: string;
       <FilterSelect label="Documentación" value={documentStatus} onChange={(value) => setDocumentStatus(value as typeof documentStatus)} options={['all', 'complete', 'missing', 'not_requested']} optionLabels={{ all: 'Todos', complete: 'Completa', missing: 'Faltan documentos', not_requested: 'Sin solicitar' }} />
       <FilterSelect label="Visita" value={viewingStatus} onChange={(value) => setViewingStatus(value as typeof viewingStatus)} options={['all', 'none', 'scheduled']} optionLabels={{ all: 'Todas', none: 'Sin visita', scheduled: 'Agendada' }} />
       <FilterSelect label="Fecha" value={submittedFilter} onChange={(value) => setSubmittedFilter(value as typeof submittedFilter)} options={['all', 'today', 'week']} optionLabels={{ all: 'Cualquier fecha', today: 'Hoy', week: 'Últimos 7 días' }} />
-      <FilterSelect label="Responsable" value={assigneeFilter} onChange={setAssigneeFilter} options={['all', ...assignees, 'unassigned']} optionLabels={{ all: 'Todos', unassigned: 'Sin asignar' }} />
+      <FilterSelect label="Responsable" value={assigneeFilter} onChange={setAssigneeFilter} options={['all', ...assignees, 'unassigned']} optionLabels={{ all: 'Todos', unassigned: 'Sin asignar', ...Object.fromEntries(teamMembers.map((member) => [member.userId, member.fullName])) }} />
       <FilterSelect label="Ordenar" value={sort} onChange={(value) => setSort(value as typeof sort)} options={['newest', 'oldest', 'income', 'status', 'next_viewing']} optionLabels={{ newest: 'Más recientes', oldest: 'Más antiguos', income: 'Mayor ingreso', status: 'Estado', next_viewing: 'Próxima visita' }} sort />
     </div>
     {hasFilters && <div className="agency-filter-summary"><Funnel size={15} /><span>Filtros activos</span><button onClick={clearFilters}>Quitar todos <X size={13} /></button></div>}
     {actionError && <p className="agency-inline-error" role="alert">{actionError}</p>}
     {visible.length ? <RemoteApplicantTable applications={visible} property={property} documentStatusLabel={documentStatusLabel} mutatingApplicationId={mutatingApplicationId} onStatusChange={changeApplicantStatus} onWhatsApp={openWhatsApp} onSchedule={setScheduling} /> : <EmptyState title="Ningún interesado coincide" description="Cambia la búsqueda o quita los filtros para volver a ver todas las solicitudes." action="Quitar filtros" onAction={clearFilters} />}
+    {applicationsPagination?.hasMore && <button className="agency-button agency-button--secondary" type="button" disabled={loadingMoreApplications} onClick={() => void loadMoreApplications()}>{loadingMoreApplications ? 'Cargando…' : `Cargar más interesados (${applications.length} de ${applicationsPagination.total})`}</button>}
     {scheduling && <RemoteAppointmentModal item={scheduling} property={property} teamMembers={teamMembers} busy={mutatingApplicationId === scheduling.application.id} onClose={() => setScheduling(null)} onSubmit={submitAppointment} />}
   </section>
 }
@@ -1643,7 +1749,7 @@ function RemoteApplicantTable({ applications, property, documentStatusLabel, mut
         <tbody>{applications.map((item, index) => {
           const data = remoteApplicantPresentation(item, property.property.monthlyRentCents)
           return <tr key={item.application.id}>
-            <td><a className="agency-person" href={detailHref(item)}><span className={`agency-avatar agency-avatar--${index % 3}`}>{data.initials}</span><span><strong>{item.tenantName}</strong><small>{item.tenantEmail}</small></span></a></td>
+            <td><a className="agency-person" href={detailHref(item)}><span className={`agency-avatar agency-avatar--${index % 3}`}>{data.initials}</span><span><strong>{item.tenantName}</strong><small>{item.tenantEmail}</small>{item.possibleDuplicate && <em className="agency-duplicate-badge">Posible duplicado</em>}</span></a></td>
             <td><div className="agency-cell-stack"><strong className="agency-cell-strong">{item.application.submittedAt ? apiRelativeDateTime(item.application.submittedAt) : 'Sin enviar'}</strong><small>Entrada {data.moveIn}</small></div></td>
             <td><div className="agency-cell-stack"><strong className="agency-cell-strong">{data.employment}</strong><small>{data.contract} · {data.household}</small></div></td>
             <td><div className="agency-cell-stack"><strong className="agency-income">{data.income}</strong><small>{data.ratio}</small><StatusBadge status={documentStatusLabel[item.application.documentState]} /></div></td>
@@ -1659,7 +1765,7 @@ function RemoteApplicantTable({ applications, property, documentStatusLabel, mut
       {applications.map((item, index) => {
         const data = remoteApplicantPresentation(item, property.property.monthlyRentCents)
         return <article className="agency-applicant-card" key={item.application.id}>
-          <a className="agency-person" href={detailHref(item)}><span className={`agency-avatar agency-avatar--${index % 3}`}>{data.initials}</span><span><strong>{item.tenantName}</strong><small>{item.tenantEmail}</small><em>{data.phone}</em></span><ArrowRight size={17} /></a>
+          <a className="agency-person" href={detailHref(item)}><span className={`agency-avatar agency-avatar--${index % 3}`}>{data.initials}</span><span><strong>{item.tenantName}</strong><small>{item.tenantEmail}</small><em>{data.phone}</em>{item.possibleDuplicate && <b className="agency-duplicate-badge">Posible duplicado</b>}</span><ArrowRight size={17} /></a>
           <div className="agency-applicant-card__statuses"><StatusBadge status={documentStatusLabel[item.application.documentState]} /><StatusBadge status={data.viewing} /></div>
           <dl><div><dt>Solicitud</dt><dd>{item.application.submittedAt ? apiRelativeDateTime(item.application.submittedAt) : 'Sin enviar'}<small>Entrada {data.moveIn}</small></dd></div><div><dt>Perfil</dt><dd>{data.employment}<small>{data.contract} · {data.household}</small></dd></div><div><dt>Ingresos</dt><dd>{data.income}<small>{data.ratio}</small></dd></div><div><dt>Seguimiento</dt><dd>{data.viewing}<small>{data.viewingDate ?? 'Sin fecha'}</small></dd></div></dl>
           <label className="agency-card-status"><span>Responsable <strong>{data.assignee}</strong></span><span>Estado <select value={item.application.status} disabled={mutatingApplicationId === item.application.id || item.application.status === 'withdrawn'} onChange={(event) => onStatusChange(item, event.target.value as Exclude<AgencyApplicantDetailApi['application']['status'], 'withdrawn'>)}><option value="new">Nuevo</option><option value="preselected">Preseleccionado</option><option value="selected">Seleccionado</option><option value="rejected">Descartado</option>{item.application.status === 'withdrawn' && <option value="withdrawn">Retirado</option>}</select></span></label>
@@ -1690,20 +1796,28 @@ function RemoteAppointmentModal({ item, property, teamMembers, busy, onClose, on
 
 function AuthenticatedAppointmentsView() {
   const [records, setRecords] = useState<AgencyAppointmentApi[]>([])
+  const [pagination, setPagination] = useState<PaginationMetadata | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [tab, setTab] = useState<'Próximas' | 'Anteriores'>(() => new URLSearchParams(window.location.search).get('vista') === 'anteriores' ? 'Anteriores' : 'Próximas')
   const [loadState, setLoadState] = useState<RemoteLoadState>('loading')
   const [error, setError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
+  const requestScope = `${tab}:${reloadKey}`
+  const requestScopeRef = useRef(requestScope)
+  requestScopeRef.current = requestScope
   useEffect(() => {
     const controller = new AbortController()
     const load = async () => {
+      setLoadingMore(false)
       setLoadState('loading')
       setError('')
       try {
-        const response = await fetch('/api/v1/agency/appointments', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
+        const scope = tab === 'Próximas' ? 'upcoming' : 'past'
+        const response = await fetch(`/api/v1/agency/appointments?scope=${scope}&page=1&pageSize=25`, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
         if (!response.ok) throw new Error(agencyRequestError(response))
-        const payload = await response.json() as { data?: { appointments?: AgencyAppointmentApi[] } }
+        const payload = await response.json() as { data?: { appointments?: AgencyAppointmentApi[]; pagination?: PaginationMetadata } }
         setRecords(payload.data?.appointments ?? [])
+        setPagination(payload.data?.pagination ?? null)
         setLoadState('loaded')
       } catch (caught) {
         if (controller.signal.aborted) return
@@ -1713,14 +1827,31 @@ function AuthenticatedAppointmentsView() {
     }
     void load()
     return () => controller.abort()
-  }, [reloadKey])
+  }, [reloadKey, tab])
+  const loadMore = async () => {
+    if (!pagination?.hasMore || loadingMore) return
+    const requestedScope = requestScopeRef.current
+    setLoadingMore(true); setError('')
+    try {
+      const scope = tab === 'Próximas' ? 'upcoming' : 'past'
+      const response = await fetch(`/api/v1/agency/appointments?scope=${scope}&page=${pagination.page + 1}&pageSize=${pagination.pageSize}`, { credentials: 'include', headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error(await agencyResponseError(response))
+      const payload = await response.json() as { data?: { appointments?: AgencyAppointmentApi[]; pagination?: PaginationMetadata } }
+      if (requestScopeRef.current !== requestedScope) return
+      setRecords((current) => [...current, ...(payload.data?.appointments ?? [])]); setPagination(payload.data?.pagination ?? null)
+    } catch (caught) {
+      if (requestScopeRef.current === requestedScope) setError(caught instanceof Error ? caught.message : 'No hemos podido cargar más citas.')
+    } finally {
+      if (requestScopeRef.current === requestedScope) setLoadingMore(false)
+    }
+  }
   const now = Date.now()
   const upcoming = records.filter((record) => record.state === 'scheduled' && new Date(record.startsAt).getTime() >= now)
   const past = records.filter((record) => record.state !== 'scheduled' || new Date(record.startsAt).getTime() < now)
   const visible = (tab === 'Próximas' ? upcoming : past).sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime())
   return <section className="agency-view"><PageHeading eyebrow="AGENDA DEL EQUIPO" title="Citas" description="Consulta las visitas de todos tus anuncios con el contexto del interesado." />
     <div className="agency-tabs" role="tablist" aria-label="Filtrar citas"><button role="tab" aria-selected={tab === 'Próximas'} onClick={() => setTab('Próximas')}>Próximas <span>{upcoming.length}</span></button><button role="tab" aria-selected={tab === 'Anteriores'} onClick={() => setTab('Anteriores')}>Anteriores <span>{past.length}</span></button></div>
-    {loadState === 'loading' ? <DashboardLoadMessage message="Cargando citas..." /> : loadState === 'error' ? <DashboardLoadMessage message={error} error loginRequired={isSessionError(error)} onRetry={() => setReloadKey((key) => key + 1)} /> : <div className="agency-panel-card agency-authenticated-appointments">{visible.length ? visible.map((record) => { const parts = apiDateParts(record.startsAt); return <a className="agency-schedule-row" href={record.href} key={record.id}><span className="agency-date-tile"><strong>{parts.day}</strong><span>{parts.month}</span></span><span><strong>{apiRelativeDateTime(record.startsAt)} · {record.applicantName}</strong><small>{record.propertyTitle}, {record.durationMinutes} min, {record.responsibleUserName ?? 'Indefinido'}</small></span><ArrowRight size={16} /></a> }) : <DashboardEmptyState title="No hay citas en esta vista" description="Las visitas aparecerán aquí cuando se programen o cambien de estado." action="Volver al panel" href="/app" />}</div>}
+    {loadState === 'loading' ? <DashboardLoadMessage message="Cargando citas..." /> : loadState === 'error' ? <DashboardLoadMessage message={error} error loginRequired={isSessionError(error)} onRetry={() => setReloadKey((key) => key + 1)} /> : <><div className="agency-panel-card agency-authenticated-appointments">{visible.length ? visible.map((record) => { const parts = apiDateParts(record.startsAt); return <a className="agency-schedule-row" href={record.href} key={record.id}><span className="agency-date-tile"><strong>{parts.day}</strong><span>{parts.month}</span></span><span><strong>{apiRelativeDateTime(record.startsAt)} · {record.applicantName}</strong><small>{record.propertyTitle}, {record.durationMinutes} min, {record.responsibleUserName ?? 'Indefinido'}</small></span><ArrowRight size={16} /></a> }) : <DashboardEmptyState title="No hay citas en esta vista" description="Las visitas aparecerán aquí cuando se programen o cambien de estado." action="Volver al panel" href="/app" />}</div>{pagination?.hasMore && <button className="agency-button agency-button--secondary" type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Cargando…' : `Cargar más citas (${records.length} de ${pagination.total})`}</button>}</>}
   </section>
 }
 
@@ -1892,9 +2023,106 @@ function PropertyEditorModal({ property, suggestedReference, onClose, onSubmit }
         <label className="agency-form-field"><span>Título público</span><input name="title" required defaultValue={property?.title ?? ''} placeholder="Piso luminoso en Chamberí" /></label>
         <div className="agency-form-grid agency-form-grid--three"><label><span>Dirección</span><input name="address" required defaultValue={property?.address ?? ''} /></label><label><span>Ciudad</span><input name="city" required defaultValue={property?.city ?? 'Madrid'} /></label><label><span>Provincia</span><input name="province" required defaultValue={property?.province ?? 'Madrid'} /></label><label><span>Código postal</span><input name="postalCode" required defaultValue={property?.postalCode ?? ''} inputMode="numeric" /></label><label><span>Tipo de inmueble</span><select name="type" defaultValue={property?.type ?? 'Piso'}><option>Piso</option><option>Ático</option><option>Estudio</option><option>Dúplex</option><option>Casa</option></select></label><label><span>Alquiler mensual</span><input name="rent" type="number" required min="1" defaultValue={property?.rent || ''} /></label><label><span>Habitaciones</span><input name="rooms" type="number" required min="0" defaultValue={property?.rooms ?? 1} /></label><label><span>Baños</span><input name="bathrooms" type="number" required min="1" defaultValue={property?.bathrooms ?? 1} /></label><label><span>Superficie en m²</span><input name="area" type="number" required min="1" defaultValue={property?.area ?? ''} /></label><label><span>Disponible desde</span><input name="available" type="date" required defaultValue={property?.available ?? '2026-09-01'} /></label><label><span>Responsable</span><select name="assignee" defaultValue={property?.assignee ?? 'Marta Soler'}><option>Marta Soler</option><option>Diego García</option></select></label></div>
         <label className="agency-form-field"><span>Descripción</span><textarea name="description" required rows={4} defaultValue={property?.description ?? ''} placeholder="Describe brevemente el inmueble y sus puntos clave." /></label>
-        <fieldset className="agency-document-request"><legend>Documentación solicitada</legend><label><input type="checkbox" defaultChecked /> Nóminas recientes</label><label><input type="checkbox" defaultChecked /> Contrato laboral</label><label><input type="checkbox" /> Otros justificantes</label></fieldset>
+        <fieldset className="agency-document-request"><legend>Documentación solicitada</legend><label><input type="checkbox" defaultChecked /> Nóminas recientes</label><label><input type="checkbox" defaultChecked /> Contrato laboral</label><label><input type="checkbox" /> Declaración de la renta (IRPF)</label><label><input type="checkbox" /> Vida laboral</label><label><input type="checkbox" /> Justificante de pensión</label><label><input type="checkbox" /> Documentación del avalista</label><label><input type="checkbox" /> Otros justificantes</label></fieldset>
         <div className="agency-cover-field"><span className="agency-property-visual agency-property-visual--blue"><HouseLine size={24} /></span><div><strong>Imagen de portada</strong><small>JPG o PNG. En este prototipo se mantiene la ilustración de muestra.</small></div><button type="button" className="agency-button agency-button--secondary agency-button--compact">Cambiar imagen</button></div>
         <footer><button type="button" className="agency-button agency-button--secondary" onClick={onClose}>Cancelar</button><button className="agency-button agency-button--primary" type="submit"><Check size={18} weight="bold" />Guardar anuncio</button></footer>
+      </form>
+    </section>
+  </div>
+}
+
+function AuthenticatedPropertyEditorModal({ property, onClose, onSaved }: { property?: AgencyPropertyApi; onClose: () => void; onSaved: (property: AgencyPropertyApi, publicLink?: string) => void }) {
+  const modalRef = useRef<HTMLElement>(null)
+  const publishKeyRef = useRef(crypto.randomUUID())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [persistedProperty, setPersistedProperty] = useState<AgencyPropertyApi['property'] | null>(property?.property ?? null)
+  const coverImageUrl = property?.property.coverImageUrl ?? null
+  useDialogAccessibility(modalRef, onClose)
+  const currentState = property?.property.state ?? 'draft'
+  const loadCurrentRecord = async (propertyId: string) => {
+    const response = await fetch(`/api/v1/agency/properties?propertyId=${encodeURIComponent(propertyId)}&pageSize=1`, { credentials: 'include', headers: { Accept: 'application/json' } })
+    const payload = await response.json().catch(() => ({})) as { data?: { properties?: AgencyPropertyApi[] }; error?: { message?: string } }
+    const record = payload.data?.properties?.find((item) => item.property.id === propertyId)
+    if (!response.ok || !record) throw new Error(payload.error?.message ?? 'No hemos podido comprobar el estado actual del anuncio.')
+    return record
+  }
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    const form = new FormData(event.currentTarget)
+    const desiredState = String(form.get('state')) as AgencyPropertyApi['property']['state']
+    if (desiredState === 'archived' && currentState !== 'archived' && !window.confirm('Archivar revoca el enlace público y no se puede deshacer. ¿Quieres continuar?')) { setBusy(false); return }
+    const body = {
+      internalReference: String(form.get('internalReference')).trim(), title: String(form.get('title')).trim(),
+      address: String(form.get('address')).trim(), city: String(form.get('city')).trim(), province: String(form.get('province')).trim(), postalCode: String(form.get('postalCode')).trim(),
+      propertyType: String(form.get('propertyType')).trim(), bedrooms: Number(form.get('bedrooms')), bathrooms: Number(form.get('bathrooms')), floorAreaSqm: Number(form.get('floorAreaSqm')),
+      availableFrom: String(form.get('availableFrom')), description: String(form.get('description')).trim(), publicLocation: String(form.get('publicLocation')).trim(),
+      coverImageUrl, galleryUrls: property?.property.galleryUrls ?? [], monthlyRentCents: Math.round(Number(form.get('monthlyRent')) * 100), responsibleUserId: property?.property.responsibleUserId ?? null,
+      requestedDocumentCategories: form.getAll('requestedDocumentCategories').map(String),
+    }
+    try {
+      const response = await fetch(persistedProperty ? `/api/v1/agency/properties/${encodeURIComponent(persistedProperty.id)}` : '/api/v1/agency/properties', {
+        method: persistedProperty ? 'PATCH' : 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, ...(persistedProperty ? { expectedVersion: persistedProperty.version } : {}) }),
+      })
+      const payload = await response.json().catch(() => ({})) as { data?: { property?: AgencyPropertyApi['property'] }; error?: { message?: string } }
+      if (!response.ok || !payload.data?.property) throw new Error(payload.error?.message ?? 'No hemos podido guardar el anuncio.')
+      let savedProperty = payload.data.property
+      let reconciledRecord: AgencyPropertyApi | null = null
+      setPersistedProperty(savedProperty)
+      let publicLink: string | undefined
+      if (desiredState !== savedProperty.state) {
+        if (savedProperty.state === 'archived' || desiredState === 'draft') throw new Error('Este cambio de estado no está permitido.')
+        const operation = desiredState === 'published' ? 'publish' : desiredState === 'paused' ? 'pause' : 'archive'
+        try {
+          const lifecycleResponse = await fetch(`/api/v1/agency/properties/${encodeURIComponent(savedProperty.id)}/${operation}`, {
+            method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(operation === 'publish' ? { 'Idempotency-Key': publishKeyRef.current } : {}) }, body: JSON.stringify({ expectedVersion: savedProperty.version }),
+          })
+          const lifecyclePayload = await lifecycleResponse.json().catch(() => ({})) as { data?: { property?: AgencyPropertyApi['property']; publicLink?: string }; error?: { message?: string } }
+          if (!lifecycleResponse.ok || !lifecyclePayload.data?.property) throw new Error(lifecyclePayload.error?.message ?? 'El anuncio se ha guardado, pero no hemos podido cambiar su estado.')
+          savedProperty = lifecyclePayload.data.property
+          setPersistedProperty(savedProperty)
+          publicLink = lifecyclePayload.data.publicLink
+        } catch (lifecycleError) {
+          try {
+            reconciledRecord = await loadCurrentRecord(savedProperty.id)
+            savedProperty = reconciledRecord.property
+            setPersistedProperty(savedProperty)
+          } catch {
+            throw lifecycleError
+          }
+          if (savedProperty.state !== desiredState) throw lifecycleError
+        }
+      }
+      if (desiredState === 'published' && savedProperty.state === 'published' && !publicLink) {
+        const linkResponse = await fetch(`/api/v1/agency/properties/${encodeURIComponent(savedProperty.id)}/public-link`, { credentials: 'include', headers: { Accept: 'application/json' } })
+        const linkPayload = await linkResponse.json().catch(() => ({})) as { data?: { publicLink?: string }; error?: { message?: string } }
+        if (!linkResponse.ok || !linkPayload.data?.publicLink) throw new Error(linkPayload.error?.message ?? 'El anuncio está publicado, pero no hemos podido recuperar su enlace.')
+        publicLink = linkPayload.data.publicLink
+      }
+      onSaved(reconciledRecord ?? { property: savedProperty, applicantCount: property?.applicantCount ?? 0, newApplicantCount: property?.newApplicantCount ?? 0, recentNewApplicantCount: property?.recentNewApplicantCount ?? 0, nextViewing: property?.nextViewing ?? null }, publicLink)
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'No hemos podido guardar el anuncio.') } finally { setBusy(false) }
+  }
+  const stateOptions: Array<{ value: AgencyPropertyApi['property']['state']; label: string }> = currentState === 'archived'
+    ? [{ value: 'archived', label: 'Archivado' }]
+    : currentState === 'published'
+      ? [{ value: 'published', label: 'Publicado' }, { value: 'paused', label: 'Pausado' }, { value: 'archived', label: 'Archivado' }]
+      : currentState === 'paused'
+        ? [{ value: 'paused', label: 'Pausado' }, { value: 'published', label: 'Publicado' }, { value: 'archived', label: 'Archivado' }]
+        : [{ value: 'draft', label: 'Borrador' }, { value: 'published', label: 'Publicado' }, { value: 'archived', label: 'Archivado' }]
+  return <div className="agency-overlay agency-overlay--center" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose() }}>
+    <section className="agency-modal agency-modal--property" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="authenticated-property-editor-title">
+      <header><div><p className="agency-eyebrow">{property ? 'EDITAR ANUNCIO' : 'NUEVO ANUNCIO'}</p><h2 id="authenticated-property-editor-title">{property?.property.title ?? 'Añadir inmueble'}</h2><p>Guarda un borrador o publica y copia el enlace en la misma operación.</p></div><button className="agency-icon-button" disabled={busy} onClick={onClose} aria-label="Cerrar"><X size={21} /></button></header>
+      <form onSubmit={submit}>
+        {error && <p className="agency-inline-error" role="alert">{error}</p>}
+        <div className="agency-form-grid"><label><span>Referencia interna</span><input name="internalReference" required maxLength={100} defaultValue={property?.property.internalReference ?? ''} placeholder="MAD-052" /></label><label><span>Estado al guardar</span><select name="state" defaultValue={currentState}>{stateOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>
+        <label className="agency-form-field"><span>Título público</span><input name="title" required minLength={2} maxLength={240} defaultValue={property?.property.title ?? ''} placeholder="Piso luminoso en Chamberí" /></label>
+        <div className="agency-form-grid agency-form-grid--three"><label><span>Dirección</span><input name="address" required defaultValue={property?.property.address ?? ''} /></label><label><span>Ciudad</span><input name="city" required defaultValue={property?.property.city ?? 'Madrid'} /></label><label><span>Provincia</span><input name="province" required defaultValue={property?.property.province ?? 'Madrid'} /></label><label><span>Código postal</span><input name="postalCode" required defaultValue={property?.property.postalCode ?? ''} inputMode="numeric" /></label><label><span>Zona pública</span><input name="publicLocation" required defaultValue={property?.property.publicLocation ?? property?.property.city ?? 'Madrid'} placeholder="Chamberí, Madrid" /></label><label><span>Tipo de inmueble</span><select name="propertyType" defaultValue={property?.property.propertyType ?? 'Piso'}><option>Piso</option><option>Ático</option><option>Estudio</option><option>Dúplex</option><option>Casa</option></select></label><label><span>Alquiler mensual (€)</span><input name="monthlyRent" type="number" required min="1" step="0.01" defaultValue={property ? property.property.monthlyRentCents / 100 : ''} /></label><label><span>Habitaciones</span><input name="bedrooms" type="number" required min="0" defaultValue={property?.property.bedrooms ?? 1} /></label><label><span>Baños</span><input name="bathrooms" type="number" required min="0" defaultValue={property?.property.bathrooms ?? 1} /></label><label><span>Superficie en m²</span><input name="floorAreaSqm" type="number" required min="1" defaultValue={property?.property.floorAreaSqm ?? ''} /></label><label><span>Disponible desde</span><input name="availableFrom" type="date" required defaultValue={property?.property.availableFrom ?? ''} /></label></div>
+        <label className="agency-form-field"><span>Descripción</span><textarea name="description" required minLength={2} maxLength={5000} rows={4} defaultValue={property?.property.description ?? ''} placeholder="Describe brevemente el inmueble y sus puntos clave." /></label>
+        <fieldset className="agency-document-request"><legend>Documentación solicitada por cada adulto</legend><label><input name="requestedDocumentCategories" value="payslips" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('payslips') ?? true} /> Nóminas recientes</label><label><input name="requestedDocumentCategories" value="employment_contract" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('employment_contract') ?? true} /> Contrato laboral</label><label><input name="requestedDocumentCategories" value="self_employed_income" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('self_employed_income') ?? false} /> Ingresos de autónomo</label><label><input name="requestedDocumentCategories" value="irpf_tax_return" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('irpf_tax_return') ?? false} /> Declaración de la renta (IRPF)</label><label><input name="requestedDocumentCategories" value="employment_history" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('employment_history') ?? false} /> Vida laboral</label><label><input name="requestedDocumentCategories" value="pension_proof" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('pension_proof') ?? false} /> Justificante de pensión</label><label><input name="requestedDocumentCategories" value="guarantor_proof" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('guarantor_proof') ?? false} /> Documentación del avalista</label><label><input name="requestedDocumentCategories" value="supporting" type="checkbox" defaultChecked={property?.property.requestedDocumentCategories.includes('supporting') ?? false} /> Otros justificantes</label></fieldset>
+        <p className="agency-form-note">Guarda el anuncio y podrás subir la imagen de portada desde su ficha.</p>
+        <footer><button type="button" className="agency-button agency-button--secondary" disabled={busy} onClick={onClose}>Cancelar</button><button className="agency-button agency-button--primary" type="submit" disabled={busy}><Check size={18} weight="bold" />{busy ? 'Guardando...' : 'Guardar anuncio'}</button></footer>
       </form>
     </section>
   </div>
@@ -1968,11 +2196,13 @@ function SimpleSettingsView() {
   return <section className="agency-view"><PageHeading eyebrow="ESPACIO DE TRABAJO" title="Configuración" description="Datos básicos y preferencias de Casa Barrio." /><div className="agency-settings-grid"><section className="agency-panel-card"><h2>Datos de la agencia</h2><label className="agency-form-field"><span>Nombre comercial</span><input defaultValue="Casa Barrio" /></label><label className="agency-form-field"><span>Correo de contacto</span><input type="email" defaultValue="hola@casabarrio.es" /></label><button className="agency-button agency-button--primary">Guardar cambios</button></section><section className="agency-panel-card agency-team-card"><h2>Equipo</h2><div><span className="agency-avatar">MS</span><span><strong>Marta Soler</strong><small>Administradora</small></span></div><div><span className="agency-avatar agency-avatar--1">DG</span><span><strong>Diego García</strong><small>Colaborador</small></span></div><button className="agency-button agency-button--secondary"><Plus size={17} />Invitar colaborador</button></section></div></section>
 }
 
-function TeamView() {
+function TeamView({ remote, canInvite }: { remote: boolean; canInvite: boolean }) {
+  if (remote) return <section className="agency-view"><TeamManager canInvite={canInvite} /></section>
   return <section className="agency-view"><PageHeading eyebrow="PLAN INMOBILIARIA" title="Equipo" description="Reparte anuncios e interesados entre las personas de tu agencia." actions={<button className="agency-button agency-button--primary"><Plus size={18} />Invitar colaborador</button>} /><div className="agency-team-list"><article><span className="agency-avatar">MS</span><div><strong>Marta Soler</strong><small>marta@casabarrio.es</small></div><StatusBadge status="Seleccionado" /><span>Administradora</span><button className="agency-icon-button" aria-label="Más acciones para Marta Soler"><DotsThree size={20} /></button></article><article><span className="agency-avatar agency-avatar--1">DG</span><div><strong>Diego García</strong><small>diego@casabarrio.es</small></div><StatusBadge status="Publicado" /><span>Colaborador</span><button className="agency-icon-button" aria-label="Más acciones para Diego García"><DotsThree size={20} /></button></article></div></section>
 }
 
-function BillingView() {
+function BillingView({ remote }: { remote: boolean }) {
+  if (remote) return <section className="agency-view"><PageHeading eyebrow="PLAN Y PAGOS" title="Facturación" description="Consulta tu plan actual y cambia sus límites cuando tu cartera lo necesite." /><PlanManager /></section>
   return <section className="agency-view"><PageHeading eyebrow="PLAN Y PAGOS" title="Facturación" description="Consulta tu prueba, método de pago y próximas facturas." /><section className="agency-billing-hero"><div><span className="agency-billing-badge"><Sparkle size={15} weight="fill" />PRUEBA GRATUITA</span><h2>Inmobiliaria</h2><p>99,99 € / mes después de la prueba</p></div><div><small>Próximo cargo</small><strong>99,99 €</strong><span>06/09/2026</span></div><button className="agency-button agency-button--secondary">Gestionar plan</button></section><div className="agency-settings-grid"><section className="agency-panel-card"><h2>Método de pago</h2><div className="agency-payment-method"><CreditCard size={25} /><span><strong>Visa terminada en 4242</strong><small>Caduca 08/29</small></span><button className="agency-text-button">Actualizar</button></div></section><section className="agency-panel-card"><h2>Tu prueba</h2><p>Te quedan 29 días. Cancela antes del 06/09/2026 para evitar el primer cargo.</p><div className="agency-trial-progress"><span /></div><small>Primer mes gratis. Se requiere tarjeta.</small></section></div></section>
 }
 

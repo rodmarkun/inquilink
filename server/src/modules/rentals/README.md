@@ -5,7 +5,7 @@ All routes use `/api/v1`. Agency routes require the current session's agency mem
 ## Property and intake links
 
 - `POST /agency/properties`
-- `GET /agency/properties?search=&state=`
+- `GET /agency/properties?search=&state=&page=&pageSize=`
 - `PATCH /agency/properties/:propertyId`
 - `POST /agency/properties/:propertyId/publish`
 - `POST /agency/properties/:propertyId/pause`
@@ -21,6 +21,7 @@ The public-link secret is stored as both a SHA-256 lookup hash and AES-256-GCM c
 - `GET|PUT /tenant/application-drafts/by-link/:token`
 - `POST /tenant/applications/by-link/:token/submit`
 - `GET /tenant/applications`
+- `GET /tenant/applications/:applicationId`
 - `POST /tenant/applications/:applicationId/withdraw`
 - `POST|DELETE /tenant/applications/:applicationId/documents[/:documentId]`
 - `POST /tenant/applications/:applicationId/documents/:documentId/access`
@@ -32,7 +33,7 @@ Documents accept PDF, JPEG, and PNG with extension, declared type, binary signat
 
 ## Agency applicant workspace
 
-- `GET /agency/properties/:propertyId/applications`
+- `GET /agency/properties/:propertyId/applications?page=&pageSize=`
 - `GET /agency/applications/:applicationId`
 - `PATCH /agency/applications/:applicationId/status`
 - `PATCH /agency/applications/:applicationId/responsible-user`
@@ -42,9 +43,11 @@ Documents accept PDF, JPEG, and PNG with extension, declared type, binary signat
 
 The only applicant statuses are `new`, `preselected`, `selected`, `rejected`, and `withdrawn`. Status changes append history and audit records. Document completeness and appointments are independent state dimensions and never change applicant status. WhatsApp returns an editable `wa.me` draft and records only that contact was initiated; it makes no delivery claim.
 
+Submitted phone, individual/household income, household counts, and intended move-in date are dual-written to typed columns while the full validated payload remains in `draft_data`. Lists default to 25 rows and cap `pageSize` at 100; `data.pagination` exposes totals and `hasMore` without changing the existing array response.
+
 ## Appointments
 
-- `GET|POST /agency/appointments`
+- `GET /agency/appointments?page=&pageSize=` and `POST /agency/appointments`
 - `PATCH /agency/appointments/:appointmentId` with `reschedule`, `cancel`, `complete`, or `no_show`
 
 Appointments must be in the future when created or rescheduled. A responsible user must belong to the current agency. Overlap detection returns non-blocking `RESPONSIBLE_USER_OVERLAP` warnings. Closed appointments cannot transition again, and all material changes are audited.

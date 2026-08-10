@@ -44,13 +44,14 @@ describe("production provider configuration", () => {
       plan: "professional",
       paymentMethodToken: "pm_provider_nonce",
       activationRequestedAt: new Date("2026-08-08T10:00:00.000Z"),
+      fiscalProfile: { fiscalId: "B12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, Madrid" },
       idempotencyKey: "request-key-123",
     });
     expect(result.paymentMethodDisplay).toBe("Tarjeta terminada en 4242");
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toBe("https://billing.example/api/subscriptions/trial");
     expect(init.headers).toMatchObject({ authorization: "Bearer production-secret-token", "idempotency-key": "request-key-123" });
-    expect(JSON.parse(init.body)).toEqual({ agencyId: "50000000-0000-4000-8000-000000000001", plan: "professional", paymentMethodToken: "pm_provider_nonce", activationRequestedAt: "2026-08-08T10:00:00.000Z" });
+    expect(JSON.parse(init.body)).toEqual({ agencyId: "50000000-0000-4000-8000-000000000001", plan: "professional", paymentMethodToken: "pm_provider_nonce", activationRequestedAt: "2026-08-08T10:00:00.000Z", fiscalProfile: { fiscalId: "B12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, Madrid" } });
   });
 
   it("preserves a path-prefixed storage gateway URL without requiring a trailing slash", async () => {
@@ -67,11 +68,16 @@ describe("production provider configuration", () => {
     const provider = new WebhookBillingProvider("https://billing.example/api", "production-secret-token");
     await expect(provider.cancel({ subscriptionRef: "subscription_123", idempotencyKey: "billing-operation:cancel" })).resolves.toBeUndefined();
     await expect(provider.reactivate({ subscriptionRef: "subscription_123", idempotencyKey: "billing-operation:reactivate" })).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(provider.changePlan({ subscriptionRef: "subscription_123", plan: "inmobiliaria", idempotencyKey: "billing-operation:plan" })).resolves.toBeUndefined();
+    await expect(provider.updateCustomerFiscalProfile({ customerRef: "customer_123", fiscalProfile: { fiscalId: "B12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, Madrid" }, idempotencyKey: "billing-operation:fiscal" })).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
       "https://billing.example/api/subscriptions/cancel",
       "https://billing.example/api/subscriptions/reactivate",
+      "https://billing.example/api/subscriptions/change-plan",
+      "https://billing.example/api/customers/fiscal-profile",
     ]);
+    expect(JSON.parse(fetchMock.mock.calls[2]![1].body)).toEqual({ subscriptionRef: "subscription_123", plan: "inmobiliaria" });
   });
 
   it.each([
@@ -91,6 +97,7 @@ describe("production provider configuration", () => {
     const error = await provider.createTrial({
       agencyId: "50000000-0000-4000-8000-000000000001", plan: "professional",
       paymentMethodToken: "pm_provider_nonce", activationRequestedAt: new Date("2026-08-08T10:00:00.000Z"), idempotencyKey: "request-key-123",
+      fiscalProfile: { fiscalId: "B12345678", billingName: "Agencia Centro SL", billingAddress: "Calle Mayor 1, Madrid" },
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(BillingProviderError);
     expect((error as BillingProviderError).kind).toBe(expectedKind);

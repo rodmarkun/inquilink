@@ -9,6 +9,7 @@ import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerBillingRoutes } from "./modules/billing/routes.js";
 import { registerRentalRoutes } from "./modules/rentals/routes.js";
 import { registerOperationalRoutes } from "./modules/operations/routes.js";
+import { registerPropertyImageRoutes } from "./modules/property-images/routes.js";
 import type { AppDependencies } from "./types.js";
 import { enrichOpenApi } from "./openapi.js";
 import type { RentalRouteOptions } from "./modules/rentals/routes.js";
@@ -76,6 +77,7 @@ export async function buildApp(deps: AppDependencies, options: { rentals?: Renta
   registerBillingRoutes(app, deps);
   registerScopedAccessRoutes(app, deps);
   registerRentalRoutes(app, deps, options.rentals);
+  registerPropertyImageRoutes(app, deps, options.rentals);
   registerOperationalRoutes(app, deps);
 
   return app;

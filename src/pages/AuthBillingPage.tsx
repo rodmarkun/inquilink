@@ -18,6 +18,7 @@ import {
   UsersThree,
   Warning,
 } from '@phosphor-icons/react'
+import { VerificationResend } from '../features/funnel/FunnelControls'
 import './AuthBillingPage.css'
 
 type PlanId = 'particular' | 'professional' | 'inmobiliaria'
@@ -292,9 +293,40 @@ type AgencyForm = {
   agency: string
   email: string
   phone: string
+  fiscalId: string
+  billingName: string
+  billingAddress: string
   password: string
   consent: boolean
-  marketing: boolean
+}
+
+type SignupSnapshot = { agency: Omit<AgencyForm, 'password'>; plan: PlanId }
+type BillingTokenizer = { createPaymentMethod: (input: { cardholderName: string; cardNumber: string; expiry: string; cvc: string }) => Promise<{ paymentMethodToken: string }> }
+type PaymentAttempt = { fingerprint: string; paymentMethodToken: string; idempotencyKey: string }
+
+declare global {
+  interface Window { InquilinkBilling?: BillingTokenizer }
+}
+
+const signupStorageKey = 'inquilink-agency-signup'
+
+function readSignupSnapshot(): SignupSnapshot | null {
+  try {
+    const value = window.sessionStorage.getItem(signupStorageKey)
+    if (!value) return null
+    const parsed = JSON.parse(value) as { agency?: Partial<AgencyForm>; plan?: PlanId }
+    if (!parsed.agency || !parsed.plan) return null
+    const { password: _password, ...safeAgency } = { ...initialAgency, ...parsed.agency }
+    return { agency: safeAgency, plan: parsed.plan }
+  } catch { return null }
+}
+
+async function tokenizeSignupPayment(input: { cardholderName: string; cardNumber: string; expiry: string; cvc: string }) {
+  if (window.InquilinkBilling) return window.InquilinkBilling.createPaymentMethod(input)
+  if (['localhost', '127.0.0.1'].includes(window.location.hostname)) {
+    return { paymentMethodToken: `pm_local_${input.cardNumber.replace(/\D/g, '').slice(-4)}` }
+  }
+  throw new Error('El proveedor de pagos no está disponible. Inténtalo de nuevo más tarde.')
 }
 
 const initialAgency: AgencyForm = {
@@ -302,9 +334,11 @@ const initialAgency: AgencyForm = {
   agency: '',
   email: '',
   phone: '',
+  fiscalId: '',
+  billingName: '',
+  billingAddress: '',
   password: '',
   consent: false,
-  marketing: false,
 }
 
 function SignupSteps({ stage }: { stage: SignupStage }) {
@@ -345,11 +379,12 @@ function SignupPage() {
     ? requestedPlan
     : 'professional'
   const trialEnd = useMemo(getTrialEndDate, [])
-  const [stage, setStage] = useState<SignupStage>('agency')
-  const [agency, setAgency] = useState<AgencyForm>(initialAgency)
-  const [plan, setPlan] = useState<PlanId>(startingPlan)
+  const snapshot = useMemo(readSignupSnapshot, [])
+  const returningVerified = params.get('verificado') === '1'
+  const [stage, setStage] = useState<SignupStage>(returningVerified ? 'plan' : 'agency')
+  const [agency, setAgency] = useState<AgencyForm>({ ...initialAgency, ...snapshot?.agency })
+  const [plan, setPlan] = useState<PlanId>(returningVerified ? startingPlan : snapshot?.plan ?? startingPlan)
   const [showPassword, setShowPassword] = useState(false)
-  const [verificationCode, setVerificationCode] = useState('')
   const [verificationMessage, setVerificationMessage] = useState('')
   const [cardNumber, setCardNumber] = useState('')
   const [expiry, setExpiry] = useState('')
@@ -357,6 +392,9 @@ function SignupPage() {
   const [cardName, setCardName] = useState('')
   const [showCardNumber, setShowCardNumber] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [submitting, setSubmitting] = useState(false)
+  const [activation, setActivation] = useState<{ trialEndsAt: string; paymentMethodDisplay: string } | null>(null)
+  const paymentAttemptRef = useRef<PaymentAttempt | null>(null)
   const selectedPlan = plans[plan]
   const stageHeadingRef = useRef<HTMLHeadingElement>(null)
   const initialStageRender = useRef(true)
@@ -369,6 +407,25 @@ function SignupPage() {
     stageHeadingRef.current?.focus()
   }, [stage])
 
+  useEffect(() => {
+    const { password: _password, ...safeAgency } = agency
+    window.sessionStorage.setItem(signupStorageKey, JSON.stringify({ agency: safeAgency, plan }))
+  }, [agency, plan])
+
+  useEffect(() => {
+    if (!returningVerified) return
+    void fetch('/api/v1/auth/me', { credentials: 'include', headers: { Accept: 'application/json' } }).then(async (response) => {
+      const payload = await response.json().catch(() => ({})) as { data?: { user?: { kind?: string; email?: string; fullName?: string }; agency?: { name?: string } }; error?: { message?: string } }
+      if (!response.ok || payload.data?.user?.kind !== 'agency') {
+        setStage('agency')
+        setErrors({ form: payload.error?.message ?? 'Inicia sesión con la cuenta que acabas de verificar.' })
+        return
+      }
+      setAgency((current) => ({ ...current, name: payload.data?.user?.fullName ?? current.name, email: payload.data?.user?.email ?? current.email, agency: payload.data?.agency?.name ?? current.agency }))
+      setStage('plan')
+    })
+  }, [returningVerified])
+
   const updateAgency = (field: keyof AgencyForm, value: string | boolean) => {
     setAgency((current) => ({ ...current, [field]: value }))
     setErrors((current) => ({ ...current, [field]: '' }))
@@ -380,38 +437,43 @@ function SignupPage() {
     if (!agency.agency.trim()) next.agency = 'Escribe el nombre de la inmobiliaria.'
     if (!/^\S+@\S+\.\S+$/.test(agency.email)) next.email = 'Introduce un correo profesional válido.'
     if (!/^\+?[0-9 ()-]{9,}$/.test(agency.phone)) next.phone = 'Introduce un teléfono válido.'
+    if (!/^(?:[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])$/.test(agency.fiscalId.replace(/[\s-]/g, '').toUpperCase())) next.fiscalId = 'Introduce un NIF, NIE o CIF válido.'
+    if (!agency.billingName.trim()) next.billingName = 'Escribe el nombre fiscal de la agencia.'
+    if (agency.billingAddress.trim().length < 5) next.billingAddress = 'Escribe la dirección fiscal completa.'
     if (agency.password.length < 10) next.password = 'La contraseña debe tener al menos 10 caracteres.'
     if (!agency.consent) next.consent = 'Debes aceptar los términos y la política de privacidad.'
     setErrors(next)
-    const firstError = ['name', 'agency', 'email', 'phone', 'password', 'consent'].find((field) => next[field])
+    const firstError = ['name', 'agency', 'email', 'phone', 'fiscalId', 'billingName', 'billingAddress', 'password', 'consent'].find((field) => next[field])
     if (firstError) focusField(`signup-${firstError}`)
     return Object.keys(next).length === 0
   }
 
-  const submitAgency = (event: FormEvent) => {
+  const submitAgency = async (event: FormEvent) => {
     event.preventDefault()
     if (validateAgency()) {
+      setSubmitting(true)
+      setErrors({})
+      try {
+        const response = await fetch('/api/v1/auth/agency/register', {
+          method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fullName: agency.name.trim(), agencyName: agency.agency.trim(), email: agency.email.trim().toLowerCase(), phone: agency.phone.trim(), fiscalId: agency.fiscalId, billingName: agency.billingName, billingAddress: agency.billingAddress, password: agency.password, termsAccepted: true, termsVersion: 'terms-2026-08-v1', returnPath: `/registro?verificado=1&plan=${plan}` }),
+        })
+        const payload = await response.json().catch(() => ({})) as { data?: { message?: string }; error?: { message?: string } }
+        if (!response.ok) throw new Error(payload.error?.message ?? 'No hemos podido crear el espacio de trabajo.')
+        setVerificationMessage(payload.data?.message ?? 'Revisa tu correo para verificar la cuenta.')
       setStage('verify')
       window.scrollTo({ top: 0, behavior: 'smooth' })
+      } catch (caught) {
+        setErrors({ form: caught instanceof Error ? caught.message : 'No hemos podido crear el espacio de trabajo.' })
+        focusField('signup-form-error')
+      } finally { setSubmitting(false) }
     }
   }
 
-  const submitVerification = (event: FormEvent) => {
-    event.preventDefault()
-    if (verificationCode !== '123456') {
-      setErrors({ verification: 'El código no es correcto. Para la demo, usa 123456.' })
-      focusField('verification-code')
-      return
-    }
-    setErrors({})
-    setStage('plan')
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-
-  const submitPayment = (event: FormEvent) => {
+  const submitPayment = async (event: FormEvent) => {
     event.preventDefault()
     const next: Record<string, string> = {}
-    if (cardNumber.replace(/\s/g, '') !== '4242424242424242') next.cardNumber = 'Para esta demo, usa 4242 4242 4242 4242.'
+    if (!/^\d{12,19}$/.test(cardNumber.replace(/\s/g, ''))) next.cardNumber = 'Introduce un número de tarjeta válido.'
     if (!isFutureExpiry(expiry)) next.expiry = 'Introduce una fecha futura con formato MM/AA.'
     if (!/^\d{3}$/.test(cvc)) next.cvc = 'Introduce los 3 dígitos del CVC.'
     if (!cardName.trim()) next.cardName = 'Escribe el nombre que figura en la tarjeta.'
@@ -420,8 +482,31 @@ function SignupPage() {
     const inputIds: Record<string, string> = { cardName: 'card-name', cardNumber: 'card-number', expiry: 'card-expiry', cvc: 'card-cvc' }
     if (firstError) focusField(inputIds[firstError])
     if (Object.keys(next).length === 0) {
+      setSubmitting(true)
+      try {
+        const fingerprint = `${plan}:${cardName.trim()}:${cardNumber.replace(/\D/g, '')}:${expiry}`
+        let attempt = paymentAttemptRef.current
+        if (!attempt || attempt.fingerprint !== fingerprint) {
+          const { paymentMethodToken } = await tokenizeSignupPayment({ cardholderName: cardName.trim(), cardNumber, expiry, cvc })
+          attempt = { fingerprint, paymentMethodToken, idempotencyKey: crypto.randomUUID() }
+          paymentAttemptRef.current = attempt
+        }
+        const response = await fetch('/api/v1/billing/trial', { method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Idempotency-Key': attempt.idempotencyKey }, body: JSON.stringify({ plan, paymentMethodToken: attempt.paymentMethodToken }) })
+        const payload = await response.json().catch(() => ({})) as { data?: { subscription?: { trialEndsAt?: string; paymentMethodDisplay?: string } }; error?: { code?: string; message?: string } }
+        if (!response.ok || !payload.data?.subscription) {
+          const retryableCodes = new Set(['BILLING_OPERATION_IN_PROGRESS', 'BILLING_TRANSITION_IN_PROGRESS', 'BILLING_RECONCILIATION_REQUIRED'])
+          if (response.status !== 503 && !retryableCodes.has(payload.error?.code ?? '')) paymentAttemptRef.current = null
+          throw new Error(payload.error?.message ?? 'No hemos podido activar la prueba.')
+        }
+        setActivation({ trialEndsAt: payload.data.subscription.trialEndsAt ?? '', paymentMethodDisplay: payload.data.subscription.paymentMethodDisplay ?? maskCard })
+        paymentAttemptRef.current = null
+        window.sessionStorage.removeItem(signupStorageKey)
       setStage('success')
       window.scrollTo({ top: 0, behavior: 'smooth' })
+      } catch (caught) {
+        setErrors({ form: caught instanceof Error ? caught.message : 'No hemos podido activar la prueba.' })
+        focusField('payment-form-error')
+      } finally { setSubmitting(false) }
     }
   }
 
@@ -461,6 +546,7 @@ function SignupPage() {
                 <h2 ref={stageHeadingRef} tabIndex={-1}>Crea tu espacio de trabajo</h2>
                 <span>Usaremos estos datos para preparar tu cuenta de administrador.</span>
               </div>
+              {errors.form && <div className="ab-form-error" id="signup-form-error" role="alert" tabIndex={-1}><Warning size={18} weight="fill" aria-hidden="true" />{errors.form}</div>}
               <div className="ab-form-grid">
                 <div className="ab-field">
                   <label htmlFor="signup-name">Nombre y apellidos</label>
@@ -483,6 +569,22 @@ function SignupPage() {
                   <input id="signup-phone" name="tel" type="tel" autoComplete="tel" inputMode="tel" placeholder="+34 600 000 000" value={agency.phone} onChange={(event) => updateAgency('phone', event.target.value)} aria-invalid={Boolean(errors.phone)} aria-describedby={errors.phone ? 'signup-phone-error' : undefined} />
                   <FieldError id="signup-phone-error">{errors.phone}</FieldError>
                 </div>
+                <div className="ab-field">
+                  <label htmlFor="signup-fiscalId">NIF / NIE / CIF</label>
+                  <input id="signup-fiscalId" autoComplete="off" placeholder="B12345678" value={agency.fiscalId} onChange={(event) => updateAgency('fiscalId', event.target.value.toUpperCase())} aria-invalid={Boolean(errors.fiscalId)} aria-describedby={errors.fiscalId ? 'signup-fiscalId-error' : undefined} />
+                  <FieldError id="signup-fiscalId-error">{errors.fiscalId}</FieldError>
+                </div>
+                <div className="ab-field">
+                  <label htmlFor="signup-billingName">Nombre o razón social</label>
+                  <input id="signup-billingName" autoComplete="organization" value={agency.billingName} onChange={(event) => updateAgency('billingName', event.target.value)} aria-invalid={Boolean(errors.billingName)} aria-describedby={errors.billingName ? 'signup-billingName-error' : undefined} />
+                  <FieldError id="signup-billingName-error">{errors.billingName}</FieldError>
+                </div>
+                <div className="ab-field ab-field-wide">
+                  <label htmlFor="signup-billingAddress">Dirección fiscal</label>
+                  <input id="signup-billingAddress" autoComplete="street-address" placeholder="Calle, número, código postal y localidad" value={agency.billingAddress} onChange={(event) => updateAgency('billingAddress', event.target.value)} aria-invalid={Boolean(errors.billingAddress)} aria-describedby={errors.billingAddress ? 'signup-billingAddress-error' : 'signup-billingAddress-help'} />
+                  <span className="ab-field-help" id="signup-billingAddress-help">Estos datos se enviarán al emisor al activar la prueba y podrás sincronizar cambios desde Facturación.</span>
+                  <FieldError id="signup-billingAddress-error">{errors.billingAddress}</FieldError>
+                </div>
                 <div className="ab-field ab-field-wide">
                   <label htmlFor="signup-password">Contraseña</label>
                   <div className="ab-password-input">
@@ -498,46 +600,25 @@ function SignupPage() {
                 <span>Acepto los <a href="/legal/terminos">términos de servicio</a> y la <a href="/legal/privacidad">política de privacidad</a>.</span>
               </label>
               <FieldError id="signup-consent-error">{errors.consent}</FieldError>
-              <label className="ab-check-row">
-                <input type="checkbox" checked={agency.marketing} onChange={(event) => updateAgency('marketing', event.target.checked)} />
-                <span>Quiero recibir consejos de producto por correo. Opcional.</span>
-              </label>
-              <button className="ab-button ab-button-dark ab-button-wide" type="submit">Continuar <ArrowRight size={18} aria-hidden="true" /></button>
+              <button className="ab-button ab-button-dark ab-button-wide" type="submit" disabled={submitting}>{submitting ? 'Creando espacio...' : 'Crear espacio'} {!submitting && <ArrowRight size={18} aria-hidden="true" />}</button>
             </form>
           )}
 
           {stage === 'verify' && (
-            <form className="ab-form ab-verify-form" onSubmit={submitVerification} noValidate>
+            <div className="ab-form ab-verify-form">
               <div className="ab-form-heading">
                 <p>Protegemos el acceso a tu agencia</p>
-                <h2 ref={stageHeadingRef} tabIndex={-1}>Verifica tu correo</h2>
-                <span>Hemos enviado un código de 6 dígitos a <strong>{agency.email}</strong>.</span>
+                <h2 ref={stageHeadingRef} tabIndex={-1}>Revisa tu correo</h2>
+                <span>{verificationMessage || `Hemos enviado un enlace seguro a ${agency.email}.`}</span>
               </div>
               <div className="ab-verify-symbol" aria-hidden="true"><ShieldCheck size={32} weight="fill" /></div>
-              <div className="ab-field">
-                <label htmlFor="verification-code">Código de verificación</label>
-                <input
-                  id="verification-code"
-                  className="ab-code-input"
-                  autoComplete="one-time-code"
-                  inputMode="numeric"
-                  maxLength={6}
-                  placeholder="123456"
-                  value={verificationCode}
-                  onChange={(event) => { setVerificationCode(event.target.value.replace(/\D/g, '')); setErrors({}); setVerificationMessage('') }}
-                  aria-invalid={Boolean(errors.verification)}
-                  aria-describedby={errors.verification ? 'verification-error' : 'verification-help'}
-                />
-                <span className="ab-field-help" id="verification-help">Para esta demo, utiliza 123456.</span>
-                <FieldError id="verification-error">{errors.verification}</FieldError>
-              </div>
-              <button className="ab-resend-link" type="button" onClick={() => setVerificationMessage('Código reenviado. Revisa tu bandeja de entrada.')}>Volver a enviar el código</button>
-              {verificationMessage && <p className="ab-inline-success" role="status">{verificationMessage}</p>}
+              <div className="ab-auth-result" role="status"><CheckCircle size={27} weight="fill" aria-hidden="true" /><strong>Enlace enviado</strong><p>Abre el enlace del correo. Verificaremos la cuenta y volverás directamente a elegir el plan.</p></div>
+              <VerificationResend initialEmail={agency.email} accountType="agency" returnPath={`/registro?verificado=1&plan=${plan}`} compact />
               <div className="ab-form-actions">
-                <button className="ab-button ab-button-plain" type="button" onClick={() => setStage('agency')}><ArrowLeft size={18} aria-hidden="true" /> Cambiar correo</button>
-                <button className="ab-button ab-button-dark" type="submit">Verificar y continuar <ArrowRight size={18} aria-hidden="true" /></button>
+                <button className="ab-button ab-button-plain" type="button" onClick={() => setStage('agency')}><ArrowLeft size={18} aria-hidden="true" /> Corregir datos</button>
+                <a className="ab-button ab-button-dark" href={`/iniciar-sesion?volver=${encodeURIComponent(`/registro?verificado=1&plan=${plan}`)}`}>Ya lo he verificado <ArrowRight size={18} aria-hidden="true" /></a>
               </div>
-            </form>
+            </div>
           )}
 
           {stage === 'plan' && (
@@ -579,7 +660,8 @@ function SignupPage() {
                 <h2 ref={stageHeadingRef} tabIndex={-1}>Añade una tarjeta</h2>
                 <span>La tarjeta es obligatoria, pero hoy no realizaremos ningún cargo.</span>
               </div>
-              <div className="ab-secure-banner"><LockKey size={19} weight="fill" aria-hidden="true" />Pago simulado y protegido. Inquilink no almacena los datos completos de la tarjeta.</div>
+              {errors.form && <div className="ab-form-error" id="payment-form-error" role="alert" tabIndex={-1}><Warning size={18} weight="fill" aria-hidden="true" />{errors.form}</div>}
+              <div className="ab-secure-banner"><LockKey size={19} weight="fill" aria-hidden="true" />El proveedor de pagos tokeniza la tarjeta. Inquilink nunca envía sus datos completos a la API.</div>
               <div className="ab-field">
                 <label htmlFor="card-name">Nombre en la tarjeta</label>
                 <input id="card-name" autoComplete="cc-name" value={cardName} onChange={(event) => { setCardName(event.target.value); setErrors((current) => ({ ...current, cardName: '' })) }} aria-invalid={Boolean(errors.cardName)} aria-describedby={errors.cardName ? 'card-name-error' : undefined} />
@@ -592,7 +674,7 @@ function SignupPage() {
                   <input id="card-number" type={showCardNumber ? 'text' : 'password'} autoComplete="cc-number" inputMode="numeric" placeholder="4242 4242 4242 4242" value={cardNumber} maxLength={19} onChange={(event) => { setCardNumber(formatCard(event.target.value)); setErrors((current) => ({ ...current, cardNumber: '' })) }} aria-invalid={Boolean(errors.cardNumber)} aria-describedby={errors.cardNumber ? 'card-number-error' : 'card-number-help'} />
                   <button type="button" onClick={() => setShowCardNumber((value) => !value)} aria-label={showCardNumber ? 'Ocultar número de tarjeta' : 'Mostrar número de tarjeta'}>{showCardNumber ? <EyeSlash size={19} /> : <Eye size={19} />}</button>
                 </div>
-                <span className="ab-field-help" id="card-number-help">Para la demo, usa 4242 4242 4242 4242.</span>
+                <span className="ab-field-help" id="card-number-help">Los datos se tokenizan en el navegador con el proveedor configurado.</span>
                 <FieldError id="card-number-error">{errors.cardNumber}</FieldError>
               </div>
               <div className="ab-form-grid">
@@ -613,13 +695,13 @@ function SignupPage() {
                   <div><dt>Hoy</dt><dd>0,00 €</dd></div>
                   <div><dt>Primer cargo, {trialEnd}</dt><dd>{selectedPlan.price}</dd></div>
                   <div><dt>Renovación posterior</dt><dd>{selectedPlan.price} / mes</dd></div>
-                  <div><dt>IVA</dt><dd>Incluido en este prototipo</dd></div>
+                  <div><dt>Impuestos</dt><dd>Se detallarán antes del primer cargo</dd></div>
                 </dl>
               </section>
               <p className="ab-confirm-copy">Al activar la prueba autorizas la renovación mensual automática desde el {trialEnd}. Puedes cancelar antes de esa fecha desde Facturación y no se realizará el primer cargo.</p>
               <div className="ab-form-actions">
                 <button className="ab-button ab-button-plain" type="button" onClick={() => setStage('plan')}><ArrowLeft size={18} aria-hidden="true" /> Atrás</button>
-                <button className="ab-button ab-button-dark" type="submit">Activar prueba gratis <ArrowRight size={18} aria-hidden="true" /></button>
+                <button className="ab-button ab-button-dark" type="submit" disabled={submitting}>{submitting ? 'Activando...' : 'Activar prueba gratis'} {!submitting && <ArrowRight size={18} aria-hidden="true" />}</button>
               </div>
             </form>
           )}
@@ -631,8 +713,8 @@ function SignupPage() {
               <h1 ref={stageHeadingRef} tabIndex={-1}>Tu espacio está listo.</h1>
               <span>Hemos preparado {agency.agency || 'tu espacio'} con el plan {selectedPlan.name}.</span>
               <div className="ab-success-details">
-                <div><CalendarBlank size={21} aria-hidden="true" /><span><small>Prueba hasta</small><strong>{trialEnd}</strong></span></div>
-                <div><CreditCard size={21} aria-hidden="true" /><span><small>Tarjeta</small><strong>{maskCard}</strong></span></div>
+                <div><CalendarBlank size={21} aria-hidden="true" /><span><small>Prueba hasta</small><strong>{activation?.trialEndsAt ? new Intl.DateTimeFormat('es-ES').format(new Date(activation.trialEndsAt)) : trialEnd}</strong></span></div>
+                <div><CreditCard size={21} aria-hidden="true" /><span><small>Tarjeta</small><strong>{activation?.paymentMethodDisplay ?? maskCard}</strong></span></div>
               </div>
               <button className="ab-button ab-button-dark ab-button-wide" type="button" onClick={() => navigate('/app')}>Entrar en mi panel <ArrowRight size={18} aria-hidden="true" /></button>
               <small>Correo verificado: {agency.email || 'tu correo'}.</small>
@@ -646,7 +728,7 @@ function SignupPage() {
 
 type LoginResponse = {
   data?: { user?: { kind?: 'agency' | 'tenant' }; returnPath?: string }
-  error?: { message?: string }
+  error?: { code?: string; message?: string }
 }
 
 function LoginPage() {
@@ -660,6 +742,7 @@ function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
+  const [verificationNeeded, setVerificationNeeded] = useState(false)
 
   const fillDemo = () => {
     setEmail('demo@inquilink.es')
@@ -692,7 +775,10 @@ function LoginPage() {
         }),
       })
       const payload = await response.json().catch(() => ({})) as LoginResponse
-      if (!response.ok) throw new Error(payload.error?.message ?? 'No hemos podido iniciar sesión. Inténtalo de nuevo.')
+      if (!response.ok) {
+        setVerificationNeeded(payload.error?.code === 'EMAIL_NOT_VERIFIED')
+        throw new Error(payload.error?.message ?? 'No hemos podido iniciar sesión. Inténtalo de nuevo.')
+      }
       navigate(safeReturnPath(payload.data?.returnPath, payload.data?.user?.kind === 'tenant' ? '/mis-solicitudes' : '/app'))
     } catch (error) {
       setErrors({ form: error instanceof Error ? error.message : 'No hemos podido conectar con Inquilink. Inténtalo de nuevo.' })
@@ -725,12 +811,12 @@ function LoginPage() {
             {errors.form && <div className="ab-form-error" id="login-form-error" role="alert" tabIndex={-1}><Warning size={18} weight="fill" aria-hidden="true" />{errors.form}</div>}
             <fieldset className="ab-account-type">
               <legend>Tipo de cuenta</legend>
-              <label><input type="radio" name="account-type" value="agency" checked={accountType === 'agency'} onChange={() => { setAccountType('agency'); setErrors((current) => ({ ...current, form: '' })) }} /><span>Agencia o propietario</span></label>
-              <label><input type="radio" name="account-type" value="tenant" checked={accountType === 'tenant'} onChange={() => { setAccountType('tenant'); setErrors((current) => ({ ...current, form: '' })) }} /><span>Inquilino</span></label>
+              <label><input type="radio" name="account-type" value="agency" checked={accountType === 'agency'} onChange={() => { setAccountType('agency'); setVerificationNeeded(false); setErrors((current) => ({ ...current, form: '' })) }} /><span>Agencia o propietario</span></label>
+              <label><input type="radio" name="account-type" value="tenant" checked={accountType === 'tenant'} onChange={() => { setAccountType('tenant'); setVerificationNeeded(false); setErrors((current) => ({ ...current, form: '' })) }} /><span>Inquilino</span></label>
             </fieldset>
             <div className="ab-field">
               <label htmlFor="login-email">Correo profesional</label>
-              <input id="login-email" type="email" autoComplete="email" inputMode="email" value={email} onChange={(event) => { setEmail(event.target.value); setErrors((current) => ({ ...current, email: '', form: '' })) }} aria-invalid={Boolean(errors.email)} aria-describedby={errors.email ? 'login-email-error' : undefined} />
+              <input id="login-email" type="email" autoComplete="email" inputMode="email" value={email} onChange={(event) => { setEmail(event.target.value); setVerificationNeeded(false); setErrors((current) => ({ ...current, email: '', form: '' })) }} aria-invalid={Boolean(errors.email)} aria-describedby={errors.email ? 'login-email-error' : undefined} />
               <FieldError id="login-email-error">{errors.email}</FieldError>
             </div>
             <div className="ab-field">
@@ -744,6 +830,7 @@ function LoginPage() {
             <label className="ab-check-row"><input type="checkbox" defaultChecked /><span>Mantener la sesión iniciada</span></label>
             <button className="ab-button ab-button-dark ab-button-wide" type="submit" disabled={submitting}>{submitting ? 'Entrando...' : 'Entrar en mi cuenta'} {!submitting && <ArrowRight size={18} aria-hidden="true" />}</button>
           </form>
+          {verificationNeeded && <VerificationResend initialEmail={email} accountType={accountType} returnPath={requestedReturnPath ?? undefined} compact />}
           <p className="ab-login-security"><ShieldCheck size={17} weight="fill" aria-hidden="true" />Acceso protegido para tu equipo inmobiliario.</p>
         </section>
       </main>

@@ -13,8 +13,10 @@ class FailOnceBillingProvider implements BillingProvider {
   readonly cancelCalls: Array<{ subscriptionRef: string; idempotencyKey: string }> = [];
   private shouldFail = true;
   async createTrial(): Promise<CreatedSubscription> { throw new Error("NOT_USED"); }
+  async updateCustomerFiscalProfile(): Promise<void> { throw new Error("NOT_USED"); }
   async updatePaymentMethod(): Promise<{ paymentMethodDisplay: string }> { throw new Error("NOT_USED"); }
   async reactivate(): Promise<void> { throw new Error("NOT_USED"); }
+  async changePlan(): Promise<void> { throw new Error("NOT_USED"); }
   async cancel(input: { subscriptionRef: string; idempotencyKey: string }): Promise<void> {
     this.cancelCalls.push(input);
     if (this.shouldFail) {
@@ -28,8 +30,10 @@ class SelectiveFailureProvider implements BillingProvider {
   readonly calls: string[] = [];
   recoveredTrial: CreatedSubscription | null = null;
   async createTrial(): Promise<CreatedSubscription> { throw new Error("NOT_USED"); }
+  async updateCustomerFiscalProfile(): Promise<void> { throw new Error("NOT_USED"); }
   async updatePaymentMethod(): Promise<{ paymentMethodDisplay: string }> { throw new Error("NOT_USED"); }
   async reactivate(): Promise<void> { throw new Error("NOT_USED"); }
+  async changePlan(): Promise<void> { throw new Error("NOT_USED"); }
   async cancel(input: { subscriptionRef: string }): Promise<void> {
     this.calls.push(input.subscriptionRef);
     if (input.subscriptionRef === "always-fails") throw new Error("provider down");

@@ -817,6 +817,12 @@
   font-size: 11px;
 }
 
+.agency-duplicate-note { display: flex; align-items: flex-start; gap: 9px; border: 1px solid #e5bd72; border-radius: 10px; background: #fff8e8; padding: 11px 13px; color: #704b13; }
+.agency-duplicate-note svg { flex: 0 0 auto; margin-top: 1px; }
+.agency-duplicate-note span { display: grid; gap: 2px; }
+.agency-duplicate-note small { line-height: 1.45; }
+.agency-duplicate-badge { display: inline-flex; width: max-content; margin-top: 3px; border-radius: 999px; background: #fff1ce; padding: 2px 6px; color: #7a5316; font-size: 9px; font-style: normal; font-weight: 800; }
+
 .agency-reschedule-form {
   display: grid;
   max-width: 760px;

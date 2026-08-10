@@ -26,9 +26,13 @@ const agencyRegistration = z.object({
   agencyName: z.string().trim().min(2).max(200),
   email: z.email().max(320),
   phone: z.string().trim().min(6).max(40),
+  fiscalId: z.string().trim().transform((value) => value.replace(/[\s-]/g, "").toUpperCase()).pipe(z.string().regex(/^(?:[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])$/)).optional(),
+  billingName: z.string().trim().min(2).max(200).optional(),
+  billingAddress: z.string().trim().min(5).max(500).optional(),
   password,
   termsAccepted: z.literal(true, { error: "Debes aceptar los términos de la cuenta para continuar." }),
   termsVersion: z.literal(CURRENT_ACCOUNT_TERMS_VERSION, { error: "La versión de los términos no es válida. Actualiza la página e inténtalo de nuevo." }),
+  returnPath,
 }).strict();
 
 const tenantRegistration = z.object({
@@ -99,9 +103,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AppDependencies):
         })
           .onConflictDoNothing({ target: [users.email, users.kind] }).returning({ id: users.id });
         if (!inserted[0]) throw new ApiError(409, "EMAIL_ALREADY_REGISTERED", "Ya existe una cuenta de agencia con este correo.");
-        await tx.insert(agencies).values({ id: agencyId, name: input.agencyName, phone: input.phone, createdAt, updatedAt: createdAt });
+        await tx.insert(agencies).values({ id: agencyId, name: input.agencyName, phone: input.phone, fiscalId: input.fiscalId ?? null, billingName: input.billingName ?? null, billingAddress: input.billingAddress ?? null, createdAt, updatedAt: createdAt });
         await tx.insert(agencyMemberships).values({ agencyId, userId, role: "admin", createdAt });
-        token = await issueToken(tx, userId, email, "verify_email", "/registro?verificado=1", createdAt);
+        token = await issueToken(tx, userId, email, "verify_email", input.returnPath ?? "/registro?verificado=1", createdAt);
       });
     } catch (error) {
       if (databaseCode(error) === "23505") throw new ApiError(409, "EMAIL_ALREADY_REGISTERED", "Ya existe una cuenta de agencia con este correo.");
@@ -160,6 +164,49 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AppDependencies):
     const session = await createSession(deps, record.userId);
     setSessionCookie(reply, deps, session.token, session.expiresAt);
     return { data: { verified: true, returnPath: record.returnPath ?? "/" } };
+  });
+
+  app.post("/api/v1/auth/resend-verification", {
+    schema: {
+      tags: ["Autenticación"], summary: "Reenviar la verificación del correo",
+      body: {
+        type: "object", additionalProperties: false, required: ["email", "accountType"],
+        properties: {
+          email: { type: "string", format: "email", maxLength: 320 },
+          accountType: { type: "string", enum: ["agency", "tenant"] },
+          returnPath: { type: "string", maxLength: 500 },
+        },
+      },
+    },
+  }, async (request) => {
+    const input = z.object({ email: z.email(), accountType: z.enum(["agency", "tenant"]), returnPath }).strict().parse(request.body);
+    const email = input.email.toLowerCase();
+    await enforceAuthRateLimits(deps, request, "recover", `verify:${input.accountType}:${email}`);
+    const rows = await deps.db.select({ id: users.id, email: users.email, emailVerifiedAt: users.emailVerifiedAt }).from(users).where(and(
+      eq(users.email, email), eq(users.kind, input.accountType), eq(users.accountState, "active"),
+    )).limit(1);
+    // Match the password-recovery endpoint's response shape and timing so this
+    // public endpoint cannot be used to enumerate registered accounts.
+    await argon2.verify(await dummyPasswordHash, dummyPassword);
+    let token: string | undefined;
+    const user = rows[0];
+    if (user && !user.emailVerifiedAt) {
+      const clock = now();
+      const cooldownSince = new Date(clock.getTime() - deps.config.AUTH_EMAIL_COOLDOWN_SECONDS * 1000);
+      await deps.db.transaction(async (tx) => {
+        const locked = await tx.select({ accountState: users.accountState, emailVerifiedAt: users.emailVerifiedAt }).from(users)
+          .where(eq(users.id, user.id)).for("update").limit(1);
+        if (locked[0]?.accountState !== "active" || locked[0].emailVerifiedAt) return;
+        const recent = deps.config.AUTH_EMAIL_COOLDOWN_SECONDS > 0
+          ? await tx.select({ id: oneTimeTokens.id }).from(oneTimeTokens).where(and(
+            eq(oneTimeTokens.userId, user.id), eq(oneTimeTokens.kind, "verify_email"), isNull(oneTimeTokens.usedAt), gt(oneTimeTokens.createdAt, cooldownSince),
+          )).limit(1)
+          : [];
+        if (!recent[0]) token = await issueToken(tx, user.id, user.email, "verify_email", input.returnPath, clock);
+      });
+    }
+    const debugToken = deps.config.NODE_ENV === "test" ? token : undefined;
+    return { data: { message: "Si la cuenta está pendiente de verificación, recibirás un nuevo correo.", ...(debugToken ? { debugToken } : {}) } };
   });
 
   app.post("/api/v1/auth/login", {

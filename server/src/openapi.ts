@@ -7,10 +7,14 @@ const boolean = { type: "boolean" };
 const password = { type: "string", format: "password", minLength: 10, maxLength: 200 };
 const shortName = { type: "string", minLength: 2, maxLength: 200 };
 const email = { type: "string", format: "email", maxLength: 320 };
-const documentCategory = { type: "string", enum: ["payslips", "employment_contract", "self_employed_income", "supporting"] };
+const documentCategory = { type: "string", enum: ["payslips", "employment_contract", "self_employed_income", "irpf_tax_return", "employment_history", "pension_proof", "guarantor_proof", "supporting"] };
 
 function object(properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema {
   return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
+}
+
+function extensibleObject(properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema {
+  return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: true };
 }
 
 function dataOf(properties: Record<string, JsonSchema>, required: string[] = Object.keys(properties)): JsonSchema {
@@ -25,12 +29,13 @@ const propertyFields: Record<string, JsonSchema> = {
   availableFrom: { type: "string", format: "date" }, description: { type: "string", minLength: 2, maxLength: 5000 }, publicLocation: { type: "string", minLength: 2, maxLength: 240 },
   coverImageUrl: { type: ["string", "null"], format: "uri", maxLength: 2000 }, galleryUrls: { type: "array", maxItems: 20, items: { type: "string", format: "uri", maxLength: 2000 } },
   monthlyRentCents: { type: "integer", minimum: 1, maximum: 100000000 }, responsibleUserId: { type: ["string", "null"], format: "uuid" },
-  requestedDocumentCategories: { type: "array", maxItems: 4, items: documentCategory },
+  requestedDocumentCategories: { type: "array", maxItems: 8, items: documentCategory },
 };
 const propertyRequired = ["internalReference", "title", "address", "city", "province", "postalCode", "propertyType", "bedrooms", "bathrooms", "floorAreaSqm", "availableFrom", "description", "publicLocation", "monthlyRentCents"];
 const applicationFields: Record<string, JsonSchema> = {
   fullName: shortName, email, phone: { type: "string", pattern: "^\\+[1-9]\\d{7,14}$" }, preferredContactChannel: { type: "string", enum: ["whatsapp", "phone", "email"] },
   adultOccupants: { type: "integer", minimum: 1, maximum: 20 }, minorOccupants: { type: "integer", minimum: 0, maximum: 20 }, intendedMoveInDate: { type: "string", format: "date" }, pets: { type: "string", enum: ["yes", "no"] },
+  additionalAdults: { type: "array", maxItems: 19, items: object({ id: uuid, fullName: shortName, email: { type: ["string", "null"], format: "email" }, phone: { type: ["string", "null"], pattern: "^\\+[1-9]\\d{7,14}$" }, employmentStatus: string, employerOrActivity: string, contractType: string, netMonthlyIncomeCents: { type: "integer", minimum: 0, maximum: 100000000 } }, ["id", "fullName", "employmentStatus", "employerOrActivity", "contractType", "netMonthlyIncomeCents"]) },
   petDetails: { type: ["string", "null"], maxLength: 500 }, message: { type: ["string", "null"], maxLength: 2000 }, employmentStatus: { type: "string", minLength: 1, maxLength: 100 },
   employerOrActivity: { type: "string", minLength: 1, maxLength: 200 }, contractType: { type: "string", minLength: 1, maxLength: 100 }, individualNetMonthlyIncomeCents: { type: "integer", minimum: 0, maximum: 100000000 },
   householdNetMonthlyIncomeCents: { type: "integer", minimum: 0, maximum: 100000000 }, guarantorAvailability: { type: "string", enum: ["yes", "no", "unsure"] },
@@ -48,6 +53,10 @@ interface OperationDocumentation {
 const dateTime = { type: "string", format: "date-time" };
 const nullableDateTime = { type: ["string", "null"], format: "date-time" };
 const nullableString = { type: ["string", "null"] };
+const paginationMetadata = object({
+  page: { type: "integer", minimum: 1 }, pageSize: { type: "integer", minimum: 1, maximum: 100 },
+  total: { type: "integer", minimum: 0 }, totalPages: { type: "integer", minimum: 0 }, hasMore: boolean,
+}, ["page", "pageSize", "total", "totalPages", "hasMore"]);
 const userSummary = object({ id: uuid, kind: accountType, email, fullName: shortName }, ["id", "kind", "email", "fullName"]);
 const authenticatedUser = object({ id: uuid, kind: accountType, email, fullName: shortName, emailVerified: boolean }, ["id", "kind", "email", "fullName", "emailVerified"]);
 const profileResponse = dataOf({ profile: object({ id: uuid, fullName: shortName, email, accountType }, ["id", "fullName", "email", "accountType"]) });
@@ -59,6 +68,7 @@ const subscription = object({
 }, ["id", "agencyId", "plan", "state", "trialEndsAt", "currentPeriodEndsAt", "cancelAtPeriodEnd", "paymentMethodDisplay", "createdAt", "updatedAt"]);
 const billingStatusResponse = dataOf({
   subscription: { anyOf: [subscription, { type: "null" }] },
+  fiscalProfile: { anyOf: [object({ fiscalId: nullableString, billingName: nullableString, billingAddress: nullableString }, ["fiscalId", "billingName", "billingAddress"]), { type: "null" }] },
   prices: object({ particular: { type: "integer", const: 999 }, professional: { type: "integer", const: 4999 }, inmobiliaria: { type: "integer", const: 9999 } }, ["particular", "professional", "inmobiliaria"]),
   allowances: object({
     particular: object({ name: { type: "string", const: "Particular" }, priceCents: { type: "integer", const: 999 }, listingLimit: { type: "integer", const: 2 }, accountLimit: { type: "integer", const: 1 } }, ["name", "priceCents", "listingLimit", "accountLimit"]),
@@ -68,6 +78,8 @@ const billingStatusResponse = dataOf({
   currency: { type: "string", const: "EUR" }, taxTreatment: { type: "string", const: "pending_commercial_decision" }, trialDays: { type: "integer", const: 30 },
 });
 const invoice = object({ id: uuid, amountCents: { type: "integer", minimum: 0, maximum: 2_147_483_647 }, currency: { type: "string", pattern: "^[A-Z]{3}$" }, status: { type: "string", enum: ["open", "paid", "past_due", "void", "uncollectible"] }, issuedAt: dateTime, hostedUrl: { type: ["string", "null"], format: "uri" } }, ["id", "amountCents", "currency", "status", "issuedAt", "hostedUrl"]);
+const adultProfile = object({ id: string, isPrimary: boolean, fullName: shortName, email: { type: ["string", "null"], format: "email" }, phone: { type: ["string", "null"] }, employmentStatus: string, employerOrActivity: string, contractType: string, netMonthlyIncomeCents: integer }, ["id", "isPrimary", "fullName", "email", "phone", "employmentStatus", "employerOrActivity", "contractType", "netMonthlyIncomeCents"]);
+const possibleDuplicate = { anyOf: [object({ matchedOn: { type: "array", uniqueItems: true, items: { type: "string", enum: ["email", "phone"] } }, applicationIds: { type: "array", items: uuid } }, ["matchedOn", "applicationIds"]), { type: "null" }], description: "Señal informativa limitada al mismo inmueble; nunca fusiona, rechaza ni cambia solicitudes." };
 const teamMember = object({ userId: uuid, fullName: shortName, email, role: { type: "string", enum: ["admin", "collaborator"] }, joinedAt: dateTime }, ["userId", "fullName", "email", "role", "joinedAt"]);
 const invitation = object({ id: uuid, email, role: { type: "string", enum: ["admin", "collaborator"] }, expiresAt: dateTime, createdAt: dateTime }, ["id", "email", "role", "expiresAt", "createdAt"]);
 const dashboardApplicant = object({ applicationId: uuid, propertyId: uuid, applicantName: shortName, propertyTitle: string, submittedAt: dateTime, href: string }, ["applicationId", "propertyId", "applicantName", "propertyTitle", "submittedAt", "href"]);
@@ -75,6 +87,45 @@ const dashboardViewing = object({ appointmentId: uuid, applicationId: uuid, prop
 const dashboardResponse = dataOf({
   newApplicants: object({ count: integer, periodDays: { type: "integer", const: 30 }, href: string, items: { type: "array", items: dashboardApplicant } }, ["count", "periodDays", "href", "items"]),
   upcomingViewings: object({ href: string, items: { type: "array", items: dashboardViewing } }, ["href", "items"]),
+});
+const viewingRecord = object({
+  id: uuid, agencyId: uuid, propertyId: uuid, applicationId: uuid,
+  responsibleUserId: { type: ["string", "null"], format: "uuid" }, startsAt: dateTime,
+  durationMinutes: { type: "integer", minimum: 15, maximum: 480 },
+  state: { type: "string", enum: ["scheduled", "completed", "cancelled", "no_show"] },
+  instructions: nullableString, internalNote: nullableString, createdAt: dateTime, updatedAt: dateTime,
+}, ["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "instructions", "internalNote", "createdAt", "updatedAt"]);
+const nullableViewingRecord = { anyOf: [viewingRecord, { type: "null" }] };
+const agencyApplicationRecord = extensibleObject({
+  id: uuid, agencyId: uuid, propertyId: uuid, tenantUserId: uuid,
+  responsibleUserId: { type: ["string", "null"], format: "uuid" },
+  status: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] },
+  documentState: { type: "string", enum: ["complete", "missing", "not_requested"] }, submittedAt: nullableDateTime,
+  phone: { type: ["string", "null"], pattern: "^\\+[1-9]\\d{7,14}$" },
+  individualNetMonthlyIncomeCents: { type: ["integer", "null"], minimum: 0, maximum: 100000000 },
+  householdNetMonthlyIncomeCents: { type: ["integer", "null"], minimum: 0, maximum: 100000000 },
+  adultOccupants: { type: ["integer", "null"], minimum: 1, maximum: 20 },
+  minorOccupants: { type: ["integer", "null"], minimum: 0, maximum: 20 },
+  intendedMoveInDate: { type: ["string", "null"], format: "date" }, applicationDataPromotedAt: nullableDateTime,
+  adultProfiles: { type: "array", items: adultProfile }, draftData: { type: "object", additionalProperties: true },
+  createdAt: dateTime, updatedAt: dateTime,
+}, ["id", "agencyId", "propertyId", "tenantUserId", "responsibleUserId", "status", "documentState", "submittedAt", "phone", "individualNetMonthlyIncomeCents", "householdNetMonthlyIncomeCents", "adultOccupants", "minorOccupants", "intendedMoveInDate", "applicationDataPromotedAt", "adultProfiles", "draftData", "createdAt", "updatedAt"]);
+const agencyPropertyRecord = extensibleObject({
+  id: uuid, agencyId: uuid, internalReference: string, title: string, address: nullableString, city: string, province: string,
+  monthlyRentCents: integer, state: { type: "string", enum: ["draft", "published", "paused", "archived"] },
+  coverImageUrl: { type: ["string", "null"], format: "uri" }, createdAt: dateTime, updatedAt: dateTime,
+}, ["id", "agencyId", "internalReference", "title", "address", "city", "province", "monthlyRentCents", "state", "coverImageUrl", "createdAt", "updatedAt"]);
+const agencyApplicationDetailResponse = dataOf({
+  application: agencyApplicationRecord,
+  applicant: { anyOf: [object({ fullName: shortName, email }, ["fullName", "email"]), { type: "null" }] },
+  responsibleUser: { anyOf: [object({ id: uuid, fullName: shortName }, ["id", "fullName"]), { type: "null" }] },
+  property: agencyPropertyRecord,
+  documents: { type: "array", items: extensibleObject({ id: uuid, applicationId: uuid, adultProfileId: string, category: documentCategory, originalName: string, contentType: string, byteSize: integer, malwareScanState: string, deletionState: string, createdAt: dateTime, updatedAt: dateTime }, ["id", "applicationId", "adultProfileId", "category", "originalName", "contentType", "byteSize", "malwareScanState", "deletionState", "createdAt", "updatedAt"]) },
+  possibleDuplicate,
+  notes: { type: "array", items: object({ note: object({ id: uuid, agencyId: uuid, applicationId: uuid, authorUserId: { type: ["string", "null"], format: "uuid" }, body: string, createdAt: dateTime }, ["id", "agencyId", "applicationId", "authorUserId", "body", "createdAt"]), authorName: shortName }, ["note", "authorName"]) },
+  statusHistory: { type: "array", items: object({ id: uuid, applicationId: uuid, agencyId: uuid, actorUserId: { type: ["string", "null"], format: "uuid" }, fromStatus: string, toStatus: string, createdAt: dateTime }, ["id", "applicationId", "agencyId", "actorUserId", "fromStatus", "toStatus", "createdAt"]) },
+  appointments: { type: "array", items: viewingRecord },
+  activity: { type: "array", items: object({ id: string, type: string, actorUserId: { type: ["string", "null"] }, createdAt: dateTime, metadata: { type: "object", additionalProperties: true } }, ["id", "type", "actorUserId", "createdAt", "metadata"]) },
 });
 const appointmentDetail = object({
   id: uuid,
@@ -94,6 +145,16 @@ const appointmentDetail = object({
   responsibleUserName: { type: ["string", "null"], minLength: 2, maxLength: 200 },
   href: string,
 }, ["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "instructions", "internalNote", "createdAt", "updatedAt", "applicantName", "propertyTitle", "responsibleUserName", "href"]);
+const propertyListItem = object({
+  property: agencyPropertyRecord,
+  applicantCount: { type: "integer", minimum: 0 }, newApplicantCount: { type: "integer", minimum: 0 }, recentNewApplicantCount: { type: "integer", minimum: 0 },
+  nextViewing: nullableViewingRecord,
+}, ["property", "applicantCount", "newApplicantCount", "recentNewApplicantCount", "nextViewing"]);
+const agencyApplicationListItem = object({
+  application: agencyApplicationRecord,
+  tenantName: shortName, tenantEmail: email, responsibleUserName: nullableString,
+  nextViewing: nullableViewingRecord, possibleDuplicate,
+}, ["application", "tenantName", "tenantEmail", "responsibleUserName", "nextViewing", "possibleDuplicate"]);
 const tenantApplicationsResponse = dataOf({
   applications: {
     type: "array",
@@ -111,12 +172,34 @@ const tenantApplicationsResponse = dataOf({
         publicLocation: { type: ["string", "null"], minLength: 2, maxLength: 240 },
         coverImageUrl: { type: ["string", "null"], format: "uri", maxLength: 2000 },
       }, ["id", "title", "publicLocation", "coverImageUrl"]),
-    }, ["application", "property"]),
+      resumePath: { type: ["string", "null"], pattern: "^/solicitud/" },
+    }, ["application", "property", "resumePath"]),
   },
+});
+const tenantApplicationDetailResponse = dataOf({
+  application: object({
+    id: uuid,
+    status: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] },
+    documentState: { type: "string", enum: ["complete", "missing", "not_requested"] },
+    submittedAt: nullableDateTime,
+    updatedAt: dateTime,
+  }, ["id", "status", "documentState", "submittedAt", "updatedAt"]),
+  property: object({
+    id: uuid, agencyName: shortName, internalReference: string, title: string, publicLocation: string,
+    monthlyRentCents: integer, propertyType: string, bedrooms: integer, bathrooms: integer,
+    floorAreaSqm: integer, availableFrom: { type: "string", format: "date" },
+    coverImageUrl: { type: ["string", "null"], format: "uri" },
+    requestedDocumentCategories: { type: "array", items: documentCategory },
+  }, ["id", "agencyName", "internalReference", "title", "publicLocation", "monthlyRentCents", "propertyType", "bedrooms", "bathrooms", "floorAreaSqm", "availableFrom", "coverImageUrl", "requestedDocumentCategories"]),
+  documents: { type: "array", items: object({
+    id: uuid, applicationId: uuid, adultProfileId: string, category: documentCategory, originalName: string, contentType: string,
+    byteSize: integer, malwareScanState: { type: "string", enum: ["pending", "clean", "infected", "error"] },
+    deletionState: { type: "string", enum: ["active", "deleting"] }, createdAt: dateTime, updatedAt: dateTime,
+  }, ["id", "applicationId", "adultProfileId", "category", "originalName", "contentType", "byteSize", "malwareScanState", "deletionState", "createdAt", "updatedAt"]) },
 });
 
 const docs: Record<string, OperationDocumentation> = {
-  "post /api/v1/auth/agency/register": { body: object({ fullName: shortName, agencyName: shortName, email, phone: { type: "string", minLength: 6, maxLength: 40 }, password, termsAccepted: { type: "boolean", const: true }, termsVersion: { type: "string", const: "terms-2026-08-v1" } }, ["fullName", "agencyName", "email", "phone", "password", "termsAccepted", "termsVersion"]), success: [201], response: dataOf({ userId: uuid, agencyId: uuid, message: string, debugToken: string }, ["userId", "agencyId", "message"]), errors: [400, 409, 413, 429, 500, 503] },
+  "post /api/v1/auth/agency/register": { body: object({ fullName: shortName, agencyName: shortName, email, phone: { type: "string", minLength: 6, maxLength: 40 }, fiscalId: { type: "string" }, billingName: shortName, billingAddress: { type: "string", minLength: 5, maxLength: 500 }, password, termsAccepted: { type: "boolean", const: true }, termsVersion: { type: "string", const: "terms-2026-08-v1" }, returnPath: { type: "string", maxLength: 500 } }, ["fullName", "agencyName", "email", "phone", "password", "termsAccepted", "termsVersion"]), success: [201], response: dataOf({ userId: uuid, agencyId: uuid, message: string, debugToken: string }, ["userId", "agencyId", "message"]), errors: [400, 409, 413, 429, 500, 503] },
   "post /api/v1/auth/tenant/register": { body: object({ fullName: shortName, email, password, termsAccepted: { type: "boolean", const: true }, termsVersion: { type: "string", const: "terms-2026-08-v1" }, returnPath: { type: "string", maxLength: 500 } }, ["fullName", "email", "password", "termsAccepted", "termsVersion"]), success: [201], response: dataOf({ userId: uuid, message: string, debugToken: string }, ["userId", "message"]), errors: [400, 409, 413, 429, 500, 503] },
   "post /api/v1/auth/verify-email": { body: object({ token: { type: "string", minLength: 20 } }, ["token"]), response: dataOf({ verified: { type: "boolean", const: true }, returnPath: string }), errors: [400, 403, 413, 500] },
   "post /api/v1/auth/login": { body: object({ email, password: { type: "string", format: "password", minLength: 1 }, accountType, returnPath: { type: "string", maxLength: 500 } }, ["email", "password", "accountType"]), response: dataOf({ user: userSummary, returnPath: string }), errors: [400, 401, 403, 413, 429, 500] },
@@ -125,13 +208,16 @@ const docs: Record<string, OperationDocumentation> = {
   "post /api/v1/auth/reset-password": { body: object({ token: { type: "string", minLength: 20 }, password }, ["token", "password"]), response: dataOf({ message: string, returnPath: string }), errors: [400, 413, 500] },
   "get /api/v1/auth/me": { response: dataOf({ user: authenticatedUser, agency: { anyOf: [object({ id: uuid, name: shortName, role: { type: "string", enum: ["admin", "collaborator"] } }, ["id", "name", "role"]), { type: "null" }] } }), errors: [401, 500] },
   "get /api/v1/billing/status": { response: billingStatusResponse, errors: [401, 403, 500] },
+  "patch /api/v1/billing/fiscal-profile": { body: object({ fiscalId: { type: "string" }, billingName: shortName, billingAddress: { type: "string", minLength: 5, maxLength: 500 } }, ["fiscalId", "billingName", "billingAddress"]), response: dataOf({ fiscalProfile: object({ fiscalId: string, billingName: string, billingAddress: string }, ["fiscalId", "billingName", "billingAddress"]) }), errors: [400, 401, 403, 409, 422, 500, 503] },
   "get /api/v1/billing/invoices": { response: dataOf({ invoices: { type: "array", items: invoice } }), errors: [401, 403, 500] },
   "post /api/v1/billing/trial": { body: object({ plan, paymentMethodToken: { type: "string", pattern: "^pm_[A-Za-z0-9_-]{4,}$" } }, ["plan", "paymentMethodToken"]), success: [201], response: dataOf({ subscription, firstChargeCents: { type: "integer", enum: [999, 4999, 9999] }, currency: { type: "string", const: "EUR" }, taxTreatment: { type: "string", const: "pending_commercial_decision" }, trialDays: { type: "integer", const: 30 } }), errors: [400, 401, 403, 409, 422, 500, 503] },
   "post /api/v1/billing/cancel": { response: dataOf({ cancelAtPeriodEnd: { type: "boolean", const: true }, effectiveAt: nullableDateTime }), errors: [400, 401, 403, 404, 409, 422, 500, 503] },
   "post /api/v1/billing/reactivate": { response: dataOf({ cancelAtPeriodEnd: { type: "boolean", const: false } }), errors: [400, 401, 403, 404, 409, 422, 500, 503] },
   "patch /api/v1/billing/payment-method": { body: object({ paymentMethodToken: { type: "string", pattern: "^pm_[A-Za-z0-9_-]{4,}$" } }, ["paymentMethodToken"]), response: dataOf({ paymentMethodDisplay: string }), errors: [400, 401, 403, 404, 409, 422, 500, 503] },
   "post /api/v1/agency/properties": { body: object(propertyFields, propertyRequired), success: [201] },
-  "patch /api/v1/agency/properties/:propertyId": { body: object(propertyFields) },
+  "get /api/v1/agency/applications/:applicationId": { response: agencyApplicationDetailResponse, errors: [400, 401, 403, 404, 500] },
+  "get /api/v1/agency/properties": { response: dataOf({ properties: { type: "array", items: propertyListItem }, pagination: paginationMetadata }), errors: [400, 401, 403, 500] },
+  "patch /api/v1/agency/properties/:propertyId": { body: object({ ...propertyFields, expectedVersion: integer }) },
   "post /api/v1/agency/properties/:propertyId/publish": { body: object({ expectedVersion: integer }, ["expectedVersion"]) },
   "post /api/v1/agency/properties/:propertyId/pause": { body: object({ expectedVersion: integer }, ["expectedVersion"]) },
   "post /api/v1/agency/properties/:propertyId/archive": { body: object({ expectedVersion: integer }, ["expectedVersion"]) },
@@ -139,14 +225,17 @@ const docs: Record<string, OperationDocumentation> = {
   "get /api/v1/public/properties/:token": { errors: [400, 404, 410, 500] },
   "get /api/v1/tenant/application-drafts/by-link/:token": { errors: [400, 401, 404, 410, 500] },
   "get /api/v1/tenant/applications": { response: tenantApplicationsResponse, errors: [401, 403, 500] },
+  "get /api/v1/tenant/applications/:applicationId": { response: tenantApplicationDetailResponse, errors: [400, 401, 403, 404, 409, 500] },
   "put /api/v1/tenant/application-drafts/by-link/:token": { body: object(applicationFields), success: [200, 201], errors: [400, 401, 404, 409, 410, 500] },
-  "post /api/v1/tenant/applications/by-link/:token/submit": { body: object({ application: object(applicationFields, Object.keys(applicationFields).filter((key) => !["petDetails", "message", "availabilityNote", "marketingConsent"].includes(key))), consentVersion: { type: "string", const: "privacy-2026-08-v1" }, privacyConsent: { type: "boolean", const: true }, submissionKey: { type: "string", minLength: 16, maxLength: 200 } }, ["application", "consentVersion", "privacyConsent", "submissionKey"]), success: [200, 201], errors: [400, 401, 404, 409, 410, 422, 500, 503] },
+  "post /api/v1/tenant/applications/by-link/:token/submit": { body: object({ application: object(applicationFields, Object.keys(applicationFields).filter((key) => !["additionalAdults", "petDetails", "message", "availabilityNote", "marketingConsent"].includes(key))), consentVersion: { type: "string", const: "privacy-2026-08-v1" }, privacyConsent: { type: "boolean", const: true }, submissionKey: { type: "string", minLength: 16, maxLength: 200 } }, ["application", "consentVersion", "privacyConsent", "submissionKey"]), success: [200, 201], errors: [400, 401, 404, 409, 410, 422, 500, 503] },
+  "get /api/v1/agency/properties/:propertyId/applications": { response: dataOf({ applications: { type: "array", items: agencyApplicationListItem }, pagination: paginationMetadata }), errors: [400, 401, 403, 404, 500] },
   "patch /api/v1/agency/applications/:applicationId/status": { body: object({ status: { type: "string", enum: ["new", "preselected", "selected", "rejected"] }, expectedStatus: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] } }, ["status", "expectedStatus"]) },
   "patch /api/v1/agency/applications/:applicationId/responsible-user": { body: object({ responsibleUserId: { type: ["string", "null"], format: "uuid" } }, ["responsibleUserId"]) },
   "post /api/v1/agency/applications/:applicationId/notes": { body: object({ body: { type: "string", minLength: 1, maxLength: 5000 } }, ["body"]), success: [201] },
   "post /api/v1/agency/applications/:applicationId/whatsapp": { body: object({ message: { type: "string", minLength: 1, maxLength: 2000 } }), bodyRequired: false },
-  "post /api/v1/tenant/applications/:applicationId/documents": { body: object({ category: documentCategory, originalName: { type: "string", minLength: 1, maxLength: 255 }, contentType: string, dataBase64: { type: "string", format: "byte", minLength: 4 } }, ["category", "originalName", "contentType", "dataBase64"]), success: [201] },
+  "post /api/v1/tenant/applications/:applicationId/documents": { body: object({ adultProfileId: { type: "string", minLength: 1, maxLength: 50 }, category: documentCategory, originalName: { type: "string", minLength: 1, maxLength: 255 }, contentType: string, dataBase64: { type: "string", format: "byte", minLength: 4 } }, ["category", "originalName", "contentType", "dataBase64"]), success: [201] },
   "post /api/v1/agency/appointments": { body: object({ applicationId: uuid, startsAt: { type: "string", format: "date-time" }, durationMinutes: { type: "integer", minimum: 15, maximum: 480 }, responsibleUserId: { type: ["string", "null"], format: "uuid" }, instructions: { type: ["string", "null"], maxLength: 1000 }, internalNote: { type: ["string", "null"], maxLength: 2000 } }, ["applicationId", "startsAt", "durationMinutes"]), success: [200, 201] },
+  "get /api/v1/agency/appointments": { response: dataOf({ appointments: { type: "array", items: appointmentDetail }, pagination: paginationMetadata }), errors: [400, 401, 403, 500] },
   "get /api/v1/agency/appointments/:appointmentId": { response: dataOf({ appointment: appointmentDetail }), errors: [400, 401, 403, 404, 500] },
   "patch /api/v1/agency/appointments/:appointmentId": { body: { oneOf: [object({ action: { const: "reschedule" }, expectedUpdatedAt: { type: "string", format: "date-time" }, startsAt: { type: "string", format: "date-time" }, durationMinutes: { type: "integer", minimum: 15, maximum: 480 }, responsibleUserId: { type: ["string", "null"], format: "uuid" }, instructions: { type: ["string", "null"], maxLength: 1000 }, internalNote: { type: ["string", "null"], maxLength: 2000 } }, ["action", "expectedUpdatedAt", "startsAt"]), object({ action: { type: "string", enum: ["cancel", "complete", "no_show"] }, expectedUpdatedAt: { type: "string", format: "date-time" } }, ["action", "expectedUpdatedAt"])] } },
   "delete /api/v1/agency/properties/:propertyId/public-link": { body: object({ expectedVersion: integer }, ["expectedVersion"]), success: [204] },
@@ -164,8 +253,8 @@ const docs: Record<string, OperationDocumentation> = {
     description: "Una cuenta de agencia autenticada envía solo el token. Una persona nueva debe incluir además nombre y contraseña.",
   }, response: dataOf({ accepted: { type: "boolean", const: true }, agencyId: uuid, message: string }), errors: [400, 409, 429, 500] },
   "get /api/v1/agency/dashboard": { response: dashboardResponse, errors: [401, 403, 500] },
-  "get /api/v1/agency/team": { response: dataOf({ members: { type: "array", items: teamMember } }), errors: [401, 403, 500] },
-  "get /api/v1/agency/team/invitations": { response: dataOf({ invitations: { type: "array", items: invitation } }), errors: [401, 403, 500] },
+  "get /api/v1/agency/team": { response: dataOf({ members: { type: "array", items: teamMember }, pagination: paginationMetadata }), errors: [401, 403, 500] },
+  "get /api/v1/agency/team/invitations": { response: dataOf({ invitations: { type: "array", items: invitation }, pagination: paginationMetadata }), errors: [401, 403, 500] },
   "get /api/v1/account/profile": { response: profileResponse, errors: [401, 403, 500] },
   "patch /api/v1/account/profile": { response: profileResponse, errors: [400, 401, 403, 409, 500] },
   "get /api/v1/agency/settings": { response: dataOf({ agency: agencySettings }), errors: [401, 403, 500] },
@@ -197,6 +286,7 @@ const publicOperations = new Set([
 
 const idempotentOperations = new Map<string, number>([
   ["post /api/v1/billing/trial", 8],
+  ["patch /api/v1/billing/fiscal-profile", 8],
   ["post /api/v1/billing/cancel", 8],
   ["post /api/v1/billing/reactivate", 8],
   ["patch /api/v1/billing/payment-method", 8],
@@ -208,8 +298,10 @@ const idempotentOperations = new Map<string, number>([
 
 const queryParameters: Record<string, Array<Record<string, unknown>>> = {
   "get /api/v1/agency/properties": [
+    { in: "query", name: "propertyId", schema: uuid },
     { in: "query", name: "search", schema: { type: "string", maxLength: 200 } },
     { in: "query", name: "state", schema: { type: "string", enum: ["draft", "published", "paused", "archived"] } },
+    { in: "query", name: "hasRecentNewApplicants", schema: { type: "boolean", enum: [true] } },
   ],
   "get /api/v1/agency/properties/:propertyId/applications": [
     { in: "query", name: "search", schema: { type: "string", maxLength: 200 } },
@@ -217,16 +309,33 @@ const queryParameters: Record<string, Array<Record<string, unknown>>> = {
     { in: "query", name: "documentState", schema: { type: "string", enum: ["complete", "missing", "not_requested"] } },
     { in: "query", name: "viewingState", schema: { type: "string", enum: ["none", "scheduled", "completed"] } },
     { in: "query", name: "responsibleUserId", schema: uuid },
+    { in: "query", name: "responsibility", schema: { type: "string", enum: ["assigned", "unassigned"] } },
     { in: "query", name: "submittedFrom", schema: { type: "string", format: "date-time" } },
     { in: "query", name: "submittedTo", schema: { type: "string", format: "date-time" } },
     { in: "query", name: "sort", schema: { type: "string", enum: ["newest", "oldest", "income", "status", "next_viewing"], default: "newest" } },
   ],
   "get /api/v1/agency/appointments": [
     { in: "query", name: "state", schema: { type: "string", enum: ["scheduled", "completed", "cancelled", "no_show"] } },
+    { in: "query", name: "scope", schema: { type: "string", enum: ["upcoming", "past"] } },
     { in: "query", name: "from", schema: { type: "string", format: "date-time" } },
     { in: "query", name: "to", schema: { type: "string", format: "date-time" } },
   ],
 };
+
+const paginatedOperations = [
+  "get /api/v1/agency/properties",
+  "get /api/v1/agency/properties/:propertyId/applications",
+  "get /api/v1/agency/appointments",
+  "get /api/v1/agency/team",
+  "get /api/v1/agency/team/invitations",
+];
+for (const operation of paginatedOperations) {
+  queryParameters[operation] = [
+    ...(queryParameters[operation] ?? []),
+    { in: "query", name: "page", schema: { type: "integer", minimum: 1, default: 1 } },
+    { in: "query", name: "pageSize", schema: { type: "integer", minimum: 1, maximum: 100, default: 25 } },
+  ];
+}
 
 function normalizePath(path: string): string {
   return path.replace(/\{([^}]+)\}/g, ":$1");

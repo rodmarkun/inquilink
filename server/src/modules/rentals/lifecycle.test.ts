@@ -6,6 +6,7 @@ import { createTestApp } from "../../test/test-app.js";
 import { runDataLifecycle } from "./lifecycle.js";
 import { MemoryPrivateDocumentStorage } from "./storage.js";
 import type { PrivateDocumentStorage, StoredObject } from "./storage.js";
+import { PROPERTY_COVER_STAGING_REASON } from "../property-images/storage-key.js";
 
 let context: Awaited<ReturnType<typeof createTestApp>>;
 let storage: MemoryPrivateDocumentStorage;
@@ -234,6 +235,30 @@ it("recovers an expired cleanup claim lease", async () => {
   expect(await storage.get("cleanup/stale")).toBeNull();
 });
 
+it("never cleans a live cover staging lease and recovers one abandoned by a crash", async () => {
+  const now = new Date("2098-01-01T01:00:00.000Z");
+  await storage.put({ key: "covers/live", body: Buffer.from("live"), contentType: "image/png" });
+  await storage.put({ key: "covers/abandoned", body: Buffer.from("abandoned"), contentType: "image/png" });
+  await context.db.insert(documentStorageCleanup).values([
+    {
+      id: "92000000-0000-4000-8000-000000000012", storageKey: "covers/live", agencyId: ids.agency,
+      applicationId: ids.property, reason: PROPERTY_COVER_STAGING_REASON, attempts: 0, nextAttemptAt: new Date(now.getTime() - 60_000),
+      createdAt: new Date(now.getTime() - 60_000), updatedAt: new Date(now.getTime() - 60_000),
+    },
+    {
+      id: "92000000-0000-4000-8000-000000000013", storageKey: "covers/abandoned", agencyId: ids.agency,
+      applicationId: ids.property, reason: PROPERTY_COVER_STAGING_REASON, attempts: 0, nextAttemptAt: new Date(now.getTime() - 10 * 60_000),
+      createdAt: new Date(now.getTime() - 10 * 60_000), updatedAt: new Date(now.getTime() - 6 * 60_000),
+    },
+  ]);
+
+  const result = await runDataLifecycle(context.db, storage, { now });
+  expect(result.orphanDeleted).toBe(1);
+  expect(await storage.get("covers/live")).not.toBeNull();
+  expect((await context.db.select().from(documentStorageCleanup).where(eq(documentStorageCleanup.storageKey, "covers/live")))[0]?.reason).toBe(PROPERTY_COVER_STAGING_REASON);
+  expect(await storage.get("covers/abandoned")).toBeNull();
+});
+
 it("purges a closed former agency member while preserving the active agency and anonymizing history", async () => {
   const old = new Date("2025-01-01T00:00:00.000Z");
   const formerId = "92000000-0000-4000-8000-000000000020";
@@ -268,4 +293,29 @@ it("rolls back the entire local agency purge graph on a crash and converges afte
   expect(await context.db.select().from(agencies).where(eq(agencies.id, agencyId))).toHaveLength(0);
   expect(await context.db.select().from(users).where(eq(users.id, memberId))).toHaveLength(0);
   expect((await context.db.select().from(agencyClosureCleanup).where(eq(agencyClosureCleanup.agencyId, agencyId)))[0]?.state).toBe("completed");
+});
+
+it("queues property covers durably and deletes them before purging a closed agency", async () => {
+  const old = new Date("2025-01-01T00:00:00.000Z");
+  const agencyId = "92000000-0000-4000-8000-000000000040";
+  const memberId = "92000000-0000-4000-8000-000000000041";
+  const propertyId = "92000000-0000-4000-8000-000000000042";
+  const version = "92000000-0000-4000-8000-000000000043";
+  const storageKey = `properties/${propertyId}/cover/${version}`;
+  await storage.put({ key: storageKey, body: Buffer.from("cover"), contentType: "image/png" });
+  await context.db.insert(users).values({ id: memberId, kind: "agency", email: "cover-purge@example.es", fullName: "Purge Cover", passwordHash: "scrubbed", accountState: "closure_requested", closureRequestedAt: old, accountPurgeNextAttemptAt: old, createdAt: old, updatedAt: old });
+  await context.db.insert(agencies).values({ id: agencyId, name: "Agencia con portada", accountState: "closure_requested", closureRequestedAt: old, accountPurgeNextAttemptAt: old, createdAt: old, updatedAt: old });
+  await context.db.insert(agencyMemberships).values({ agencyId, userId: memberId, role: "admin", createdAt: old });
+  await context.db.insert(properties).values({ id: propertyId, agencyId, internalReference: "COVER-1", title: "Piso con portada", city: "Madrid", province: "Madrid", monthlyRentCents: 100_000, coverImageUrl: `http://localhost:3000/api/v1/property-images/${propertyId}/${version}`, createdAt: old, updatedAt: old });
+  await context.db.insert(agencyClosureCleanup).values({ id: "92000000-0000-4000-8000-000000000044", agencyId, state: "ready_for_purge", nextAttemptAt: old, createdAt: old, updatedAt: old });
+
+  const queued = await runDataLifecycle(context.db, storage, { now: new Date("2098-01-01T00:00:00.000Z"), accountRetentionDays: 0 });
+  expect(queued).toMatchObject({ agenciesDeleted: 0, accountClosuresDeferred: 1 });
+  expect((await context.db.select().from(properties).where(eq(properties.id, propertyId)))[0]?.coverImageUrl).toBeNull();
+  expect((await context.db.select().from(documentStorageCleanup).where(eq(documentStorageCleanup.storageKey, storageKey)))[0]?.reason).toBe("PROPERTY_COVER_ACCOUNT_CLOSURE");
+
+  const purged = await runDataLifecycle(context.db, storage, { now: new Date("2098-01-01T00:01:00.000Z"), accountRetentionDays: 0 });
+  expect(purged.agenciesDeleted).toBe(1);
+  expect(await storage.get(storageKey)).toBeNull();
+  expect(await context.db.select().from(agencies).where(eq(agencies.id, agencyId))).toHaveLength(0);
 });
