@@ -96,16 +96,27 @@ describe("agency operations", () => {
   });
 
   it("returns the dashboard blocks and scopes every item to the agency", async () => {
+    // Un anuncio publicado sin interesados y un borrador: el gráfico incluye todo lo publicado, y solo lo publicado.
+    const publishedWithoutApplicants = "30000000-0000-4000-8000-000000000033";
+    const draftProperty = "30000000-0000-4000-8000-000000000034";
+    await context.db.insert(properties).values([
+      { id: publishedWithoutApplicants, agencyId: agencyA, internalReference: "A-2", title: "Piso A2", city: "Madrid", province: "Madrid", monthlyRentCents: 90_000, state: "published", createdAt: fixedNow, updatedAt: fixedNow },
+      { id: draftProperty, agencyId: agencyA, internalReference: "A-3", title: "Piso A3", city: "Madrid", province: "Madrid", monthlyRentCents: 80_000, state: "draft", createdAt: fixedNow, updatedAt: fixedNow },
+    ]);
     const response = await context.app.inject({ method: "GET", url: "/api/v1/agency/dashboard", headers: cookie("admin-a-token") });
     expect(response.statusCode).toBe(200);
     expect(response.json().data).toEqual(expect.objectContaining({
       newApplicants: expect.objectContaining({ count: 1, periodDays: 30 }),
-      upcomingViewings: expect.objectContaining({ items: [expect.objectContaining({ applicationId: applicationA, propertyId: propertyA })] }),
-      topProperties: expect.objectContaining({ items: [expect.objectContaining({ propertyId: propertyA, applicantCount: 1 })] }),
+      upcomingViewings: expect.objectContaining({ items: [expect.objectContaining({ applicationId: applicationA, propertyId: propertyA, responsibleUserName: "Admin A" })] }),
+      topProperties: expect.objectContaining({ items: [
+        expect.objectContaining({ propertyId: propertyA, applicantCount: 1 }),
+        expect.objectContaining({ propertyId: publishedWithoutApplicants, applicantCount: 0 }),
+      ] }),
     }));
     expect(Object.keys(response.json().data).sort()).toEqual(["newApplicants", "topProperties", "upcomingViewings"]);
     expect(JSON.stringify(response.json())).not.toContain(applicationB);
     expect(JSON.stringify(response.json())).not.toContain(propertyB);
+    expect(JSON.stringify(response.json())).not.toContain(draftProperty);
   });
 
   it("returns a zero-filled daily applicant trend with per-property breakdowns", async () => {

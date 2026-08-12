@@ -962,7 +962,7 @@ describe("agency applicant workspace", () => {
     expect(context.emailProvider.messages).toHaveLength(beforeMessages);
   });
 
-  it("scopes list/detail, supports filters, and audits only the five applicant statuses", async () => {
+  it("scopes list/detail, supports filters, and audits only the six applicant statuses", async () => {
     const filtered = await context.app.inject({ method: "GET", url: `/api/v1/agency/properties/${ids.propertyA}/applications?search=Luc%C3%ADa&status=new&documentState=missing&sort=income`, headers: { cookie: cookies.adminA } });
     expect(filtered.statusCode).toBe(200);
     expect(filtered.json().data.applications).toHaveLength(1);
@@ -1269,6 +1269,46 @@ describe("agency applicant workspace", () => {
     expect(finalAgain.statusCode).toBe(409);
     expect((await context.db.select().from(applications))[0]?.status).toBe("new");
     expect((await context.db.select().from(appointments))).toHaveLength(2);
+  });
+
+  it("archives only final appointments and restores them with optimistic concurrency", async () => {
+    const created = await context.app.inject({ method: "POST", url: "/api/v1/agency/appointments", headers: { cookie: cookies.adminA, "idempotency-key": "appointment-archive-0001" }, payload: { applicationId: ids.applicationA, startsAt: "2098-09-01T18:00:00+02:00", durationMinutes: 30, responsibleUserId: ids.adminA, instructions: null, internalNote: null } });
+    expect(created.statusCode).toBe(201);
+    const appointmentId = created.json().data.appointment.id as string;
+    expect(created.json().data.appointment.archivedAt).toBeNull();
+
+    const scheduledArchive = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "archive", expectedUpdatedAt: created.json().data.appointment.updatedAt } });
+    expect(scheduledArchive.statusCode).toBe(409);
+    expect(scheduledArchive.json().error.code).toBe("APPOINTMENT_NOT_ARCHIVABLE");
+
+    const completed = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "complete", expectedUpdatedAt: created.json().data.appointment.updatedAt } });
+    expect(completed.statusCode).toBe(200);
+
+    const staleArchive = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "archive", expectedUpdatedAt: created.json().data.appointment.updatedAt } });
+    expect(staleArchive.statusCode).toBe(409);
+    expect(staleArchive.json().error.code).toBe("APPOINTMENT_CHANGED");
+
+    const archived = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "archive", expectedUpdatedAt: completed.json().data.appointment.updatedAt } });
+    expect(archived.statusCode).toBe(200);
+    expect(archived.json().data.appointment.archivedAt).not.toBeNull();
+
+    const archivedAgain = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "archive", expectedUpdatedAt: archived.json().data.appointment.updatedAt } });
+    expect(archivedAgain.statusCode).toBe(409);
+    expect(archivedAgain.json().error.code).toBe("APPOINTMENT_ALREADY_ARCHIVED");
+
+    const activeList = await context.app.inject({ method: "GET", url: "/api/v1/agency/appointments?archived=false", headers: { cookie: cookies.adminA } });
+    expect(activeList.json().data.appointments.map((row: { id: string }) => row.id)).not.toContain(appointmentId);
+    const archivedList = await context.app.inject({ method: "GET", url: "/api/v1/agency/appointments?archived=true", headers: { cookie: cookies.adminA } });
+    expect(archivedList.json().data.appointments.map((row: { id: string }) => row.id)).toContain(appointmentId);
+
+    const restored = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "unarchive", expectedUpdatedAt: archived.json().data.appointment.updatedAt } });
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json().data.appointment.archivedAt).toBeNull();
+    expect(restored.json().data.appointment.state).toBe("completed");
+
+    const notArchived = await context.app.inject({ method: "PATCH", url: `/api/v1/agency/appointments/${appointmentId}`, headers: { cookie: cookies.adminA }, payload: { action: "unarchive", expectedUpdatedAt: restored.json().data.appointment.updatedAt } });
+    expect(notArchived.statusCode).toBe(409);
+    expect(notArchived.json().error.code).toBe("APPOINTMENT_NOT_ARCHIVED");
   });
 
   it("allows a visit to remain indefinite and assigns its worker independently from the applicant", async () => {

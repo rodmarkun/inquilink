@@ -1,5 +1,6 @@
 import argon2 from "argon2";
 import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireAdmin, requireAgency, requireUser } from "../../auth/session.js";
@@ -90,6 +91,7 @@ export function registerOperationalRoutes(app: FastifyInstance, deps: AppDepende
     const { agency } = requireAgency(request);
     const current = now();
     const last30Days = new Date(current.getTime() - 30 * 86_400_000);
+    const responsibleUsers = alias(users, "responsible_users");
     const applicantScope = and(
       eq(applications.agencyId, agency.id),
       eq(applications.status, "new"),
@@ -116,12 +118,15 @@ export function registerOperationalRoutes(app: FastifyInstance, deps: AppDepende
         propertyTitle: properties.title,
         startsAt: appointments.startsAt,
         durationMinutes: appointments.durationMinutes,
+        responsibleUserName: responsibleUsers.fullName,
       }).from(appointments)
         .innerJoin(applications, and(eq(applications.id, appointments.applicationId), eq(applications.agencyId, agency.id)))
         .innerJoin(users, eq(users.id, applications.tenantUserId))
         .innerJoin(properties, and(eq(properties.id, appointments.propertyId), eq(properties.agencyId, agency.id)))
+        .leftJoin(responsibleUsers, eq(responsibleUsers.id, appointments.responsibleUserId))
         .where(and(eq(appointments.agencyId, agency.id), eq(appointments.state, "scheduled"), gte(appointments.startsAt, current)))
         .orderBy(asc(appointments.startsAt)).limit(3),
+      // Un sector del gráfico por cada anuncio publicado: se devuelven todos, también con cero interesados.
       deps.db.select({
         propertyId: properties.id,
         internalReference: properties.internalReference,
@@ -130,15 +135,14 @@ export function registerOperationalRoutes(app: FastifyInstance, deps: AppDepende
         coverImageUrl: properties.coverImageUrl,
         applicantCount: count(applications.id),
       }).from(properties)
-        .innerJoin(applications, and(
+        .leftJoin(applications, and(
           eq(applications.propertyId, properties.id),
           eq(applications.agencyId, agency.id),
           isNotNull(applications.submittedAt),
         ))
-        .where(eq(properties.agencyId, agency.id))
+        .where(and(eq(properties.agencyId, agency.id), eq(properties.state, "published")))
         .groupBy(properties.id)
-        .orderBy(desc(count(applications.id)), asc(properties.title))
-        .limit(3),
+        .orderBy(desc(count(applications.id)), asc(properties.title)),
     ]);
     return {
       data: {

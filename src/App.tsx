@@ -23,7 +23,6 @@ const homeStructuredData = {
     {
       '@type': 'FAQPage',
       mainEntity: [
-        { '@type': 'Question', name: '¿El primer mes es realmente gratis?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Dispones de 30 días gratis. Se requiere tarjeta y puedes cancelar antes de que termine el periodo.' } },
         { '@type': 'Question', name: '¿Los inquilinos necesitan una cuenta?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Cada interesado crea una cuenta o inicia sesión antes de completar la solicitud para guardar su progreso y consultar sus candidaturas con seguridad.' } },
         { '@type': 'Question', name: '¿Puedo cancelar durante la prueba?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Puedes cancelar en cualquier momento desde Facturación. Verás la fecha exacta del primer cargo antes de confirmar el plan.' } },
         { '@type': 'Question', name: '¿Cómo funciona el enlace de cada inmueble?', acceptedAnswer: { '@type': 'Answer', text: 'Al publicar un anuncio, Inquilink genera un enlace único. Puedes copiarlo en un clic y añadirlo a cualquier portal inmobiliario o compartirlo por WhatsApp.' } },
@@ -37,7 +36,7 @@ const homeStructuredData = {
 const publicPlaceholders: Record<string, { title: string; body: string }> = {
   '/precios': {
     title: 'Planes para cada inmobiliaria',
-    body: 'Elige Particular, Profesional o Inmobiliaria y disfruta del primer mes gratis. Se requiere tarjeta.',
+    body: 'Elige Particular, Profesional o Inmobiliaria según el tamaño de tu cartera y tu equipo.',
   },
   '/iniciar-sesion': {
     title: 'Iniciar sesión',
@@ -93,7 +92,7 @@ export function App() {
         ? 'Facturación'
         : publicPlaceholders[path]?.title
     const fullTitle = path === '/'
-      ? 'Inquilink | Gestión de inquilinos para inmobiliarias'
+      ? 'Inquilink | El Portal de Inquilinos para Inmobiliarias y Particulares'
       : path.startsWith('/solicitud/')
         ? 'Solicitud de alquiler | Inquilink'
         : `${routeTitle ?? 'Página no encontrada'} | Inquilink`

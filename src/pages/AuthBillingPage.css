@@ -1497,6 +1497,11 @@
   color: #28623c;
 }
 
+.ab-tenant-status.is-final_tenant {
+  background: #f8dccf;
+  color: #8a3b28;
+}
+
 .ab-tenant-applications dl {
   display: flex;
   flex-wrap: wrap;

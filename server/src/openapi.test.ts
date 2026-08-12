@@ -44,7 +44,9 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
     .toEqual(expect.objectContaining({ id: expect.any(Object), amountCents: expect.any(Object), status: expect.any(Object), issuedAt: expect.any(Object) }));
 
   const dashboard = document.paths["/api/v1/agency/dashboard"].get.responses["200"].content["application/json"].schema.properties.data;
-  expect(Object.keys(dashboard.properties).sort()).toEqual(["newApplicants", "upcomingViewings"]);
+  expect(Object.keys(dashboard.properties).sort()).toEqual(["newApplicants", "topProperties", "upcomingViewings"]);
+  expect(dashboard.properties.upcomingViewings.properties.items.items.required).toContain("responsibleUserName");
+  expect(dashboard.properties.topProperties.properties.items.items.properties.applicantCount).toEqual({ type: "integer", minimum: 0 });
   expect(document.paths["/api/v1/agency/team"].get.responses["200"].content["application/json"].schema.properties.data.properties.members.items.required)
     .toEqual(["userId", "fullName", "email", "role", "joinedAt"]);
   for (const operation of [
@@ -67,7 +69,7 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   const applicationListSchema = document.paths["/api/v1/agency/properties/{propertyId}/applications"].get.responses["200"].content["application/json"].schema;
   const applicationDetailSchema = document.paths["/api/v1/agency/applications/{applicationId}"].get.responses["200"].content["application/json"].schema;
   const viewingSchema = propertyListSchema.properties.data.properties.properties.items.properties.nextViewing.anyOf[0];
-  expect(viewingSchema.required).toEqual(["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "instructions", "internalNote", "createdAt", "updatedAt"]);
+  expect(viewingSchema.required).toEqual(["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "archivedAt", "instructions", "internalNote", "createdAt", "updatedAt"]);
   expect(applicationDetailSchema.properties.data.required).toEqual(["application", "applicant", "responsibleUser", "property", "documents", "possibleDuplicate", "notes", "statusHistory", "appointments", "activity"]);
 
   const ajv = new Ajv2020({ strict: false });
@@ -78,7 +80,7 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   const at = "2026-08-09T10:00:00.000Z";
   const pagination = { page: 1, pageSize: 25, total: 1, totalPages: 1, hasMore: false };
   const property = { id: propertyId, agencyId: id, internalReference: "MAD-1", title: "Piso", address: null, city: "Madrid", province: "Madrid", monthlyRentCents: 120000, state: "published", coverImageUrl: null, createdAt: at, updatedAt: at };
-  const viewing = { id, agencyId: id, propertyId, applicationId, responsibleUserId: null, startsAt: at, durationMinutes: 30, state: "scheduled", instructions: null, internalNote: null, createdAt: at, updatedAt: at };
+  const viewing = { id, agencyId: id, propertyId, applicationId, responsibleUserId: null, startsAt: at, durationMinutes: 30, state: "scheduled", archivedAt: null, instructions: null, internalNote: null, createdAt: at, updatedAt: at };
   const applicationPayload = { id: applicationId, agencyId: id, propertyId, tenantUserId: id, responsibleUserId: null, status: "new", documentState: "not_requested", submittedAt: at, phone: "+34612345678", individualNetMonthlyIncomeCents: 200000, householdNetMonthlyIncomeCents: 300000, adultOccupants: 1, minorOccupants: 0, intendedMoveInDate: "2026-10-01", applicationDataPromotedAt: at, adultProfiles: [], draftData: {}, createdAt: at, updatedAt: at };
   for (const [schema, payload] of [
     [propertyListSchema, { data: { properties: [{ property, applicantCount: 1, newApplicantCount: 1, recentNewApplicantCount: 1, nextViewing: viewing }], pagination } }],
@@ -113,7 +115,7 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   expect(tenantApplicationItem.required).toEqual(["application", "property", "resumePath"]);
   expect(tenantApplicationItem.properties.resumePath.type).toEqual(["string", "null"]);
   expect(tenantApplicationItem.properties.application.required).toEqual(["id", "status", "documentState", "submittedAt", "updatedAt"]);
-  expect(tenantApplicationItem.properties.application.properties.status.enum).toEqual(["new", "preselected", "selected", "rejected", "withdrawn"]);
+  expect(tenantApplicationItem.properties.application.properties.status.enum).toEqual(["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"]);
   expect(tenantApplicationItem.properties.application.properties.documentState.enum).toEqual(["complete", "missing", "not_requested"]);
   expect(tenantApplicationItem.properties.application.properties.submittedAt.type).toEqual(["string", "null"]);
   expect(tenantApplicationItem.properties.property.required).toEqual(["id", "title", "publicLocation", "coverImageUrl"]);

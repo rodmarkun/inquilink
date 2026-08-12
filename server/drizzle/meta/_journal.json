@@ -218,6 +218,20 @@
       "when": 1786312134365,
       "tag": "0030_low_guardian",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1786473961547,
+      "tag": "0031_add_final_tenant_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1786476320119,
+      "tag": "0032_appointment_archived_at",
+      "breakpoints": true
     }
   ]
 }

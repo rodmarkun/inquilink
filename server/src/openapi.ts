@@ -83,23 +83,25 @@ const possibleDuplicate = { anyOf: [object({ matchedOn: { type: "array", uniqueI
 const teamMember = object({ userId: uuid, fullName: shortName, email, role: { type: "string", enum: ["admin", "collaborator"] }, joinedAt: dateTime }, ["userId", "fullName", "email", "role", "joinedAt"]);
 const invitation = object({ id: uuid, email, role: { type: "string", enum: ["admin", "collaborator"] }, expiresAt: dateTime, createdAt: dateTime }, ["id", "email", "role", "expiresAt", "createdAt"]);
 const dashboardApplicant = object({ applicationId: uuid, propertyId: uuid, applicantName: shortName, propertyTitle: string, submittedAt: dateTime, href: string }, ["applicationId", "propertyId", "applicantName", "propertyTitle", "submittedAt", "href"]);
-const dashboardViewing = object({ appointmentId: uuid, applicationId: uuid, propertyId: uuid, applicantName: shortName, propertyTitle: string, startsAt: dateTime, durationMinutes: integer, href: string }, ["appointmentId", "applicationId", "propertyId", "applicantName", "propertyTitle", "startsAt", "durationMinutes", "href"]);
+const dashboardViewing = object({ appointmentId: uuid, applicationId: uuid, propertyId: uuid, applicantName: shortName, propertyTitle: string, startsAt: dateTime, durationMinutes: integer, responsibleUserName: { type: ["string", "null"], minLength: 2, maxLength: 200 }, href: string }, ["appointmentId", "applicationId", "propertyId", "applicantName", "propertyTitle", "startsAt", "durationMinutes", "responsibleUserName", "href"]);
+const dashboardTopProperty = object({ propertyId: uuid, internalReference: { type: "string", minLength: 1, maxLength: 100 }, title: string, city: string, coverImageUrl: { type: ["string", "null"], format: "uri", maxLength: 2000 }, applicantCount: { type: "integer", minimum: 0 }, href: string }, ["propertyId", "internalReference", "title", "city", "coverImageUrl", "applicantCount", "href"]);
 const dashboardResponse = dataOf({
   newApplicants: object({ count: integer, periodDays: { type: "integer", const: 30 }, href: string, items: { type: "array", items: dashboardApplicant } }, ["count", "periodDays", "href", "items"]),
   upcomingViewings: object({ href: string, items: { type: "array", items: dashboardViewing } }, ["href", "items"]),
+  topProperties: object({ href: string, items: { type: "array", items: dashboardTopProperty, description: "Todos los anuncios publicados de la agencia con su número de interesados (también cero)." } }, ["href", "items"]),
 });
 const viewingRecord = object({
   id: uuid, agencyId: uuid, propertyId: uuid, applicationId: uuid,
   responsibleUserId: { type: ["string", "null"], format: "uuid" }, startsAt: dateTime,
   durationMinutes: { type: "integer", minimum: 15, maximum: 480 },
-  state: { type: "string", enum: ["scheduled", "completed", "cancelled", "no_show"] },
+  state: { type: "string", enum: ["scheduled", "completed", "cancelled", "no_show"] }, archivedAt: nullableDateTime,
   instructions: nullableString, internalNote: nullableString, createdAt: dateTime, updatedAt: dateTime,
-}, ["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "instructions", "internalNote", "createdAt", "updatedAt"]);
+}, ["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "archivedAt", "instructions", "internalNote", "createdAt", "updatedAt"]);
 const nullableViewingRecord = { anyOf: [viewingRecord, { type: "null" }] };
 const agencyApplicationRecord = extensibleObject({
   id: uuid, agencyId: uuid, propertyId: uuid, tenantUserId: uuid,
   responsibleUserId: { type: ["string", "null"], format: "uuid" },
-  status: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] },
+  status: { type: "string", enum: ["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"] },
   documentState: { type: "string", enum: ["complete", "missing", "not_requested"] }, submittedAt: nullableDateTime,
   phone: { type: ["string", "null"], pattern: "^\\+[1-9]\\d{7,14}$" },
   individualNetMonthlyIncomeCents: { type: ["integer", "null"], minimum: 0, maximum: 100000000 },
@@ -136,6 +138,7 @@ const appointmentDetail = object({
   startsAt: dateTime,
   durationMinutes: { type: "integer", minimum: 15, maximum: 480 },
   state: { type: "string", enum: ["scheduled", "completed", "cancelled", "no_show"] },
+  archivedAt: nullableDateTime,
   instructions: { type: ["string", "null"], maxLength: 1000 },
   internalNote: { type: ["string", "null"], maxLength: 2000 },
   createdAt: dateTime,
@@ -144,7 +147,7 @@ const appointmentDetail = object({
   propertyTitle: string,
   responsibleUserName: { type: ["string", "null"], minLength: 2, maxLength: 200 },
   href: string,
-}, ["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "instructions", "internalNote", "createdAt", "updatedAt", "applicantName", "propertyTitle", "responsibleUserName", "href"]);
+}, ["id", "agencyId", "propertyId", "applicationId", "responsibleUserId", "startsAt", "durationMinutes", "state", "archivedAt", "instructions", "internalNote", "createdAt", "updatedAt", "applicantName", "propertyTitle", "responsibleUserName", "href"]);
 const propertyListItem = object({
   property: agencyPropertyRecord,
   applicantCount: { type: "integer", minimum: 0 }, newApplicantCount: { type: "integer", minimum: 0 }, recentNewApplicantCount: { type: "integer", minimum: 0 },
@@ -161,7 +164,7 @@ const tenantApplicationsResponse = dataOf({
     items: object({
       application: object({
         id: uuid,
-        status: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] },
+        status: { type: "string", enum: ["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"] },
         documentState: { type: "string", enum: ["complete", "missing", "not_requested"] },
         submittedAt: nullableDateTime,
         updatedAt: dateTime,
@@ -179,7 +182,7 @@ const tenantApplicationsResponse = dataOf({
 const tenantApplicationDetailResponse = dataOf({
   application: object({
     id: uuid,
-    status: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] },
+    status: { type: "string", enum: ["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"] },
     documentState: { type: "string", enum: ["complete", "missing", "not_requested"] },
     submittedAt: nullableDateTime,
     updatedAt: dateTime,
@@ -229,7 +232,7 @@ const docs: Record<string, OperationDocumentation> = {
   "put /api/v1/tenant/application-drafts/by-link/:token": { body: object(applicationFields), success: [200, 201], errors: [400, 401, 404, 409, 410, 500] },
   "post /api/v1/tenant/applications/by-link/:token/submit": { body: object({ application: object(applicationFields, Object.keys(applicationFields).filter((key) => !["additionalAdults", "petDetails", "message", "availabilityNote", "marketingConsent"].includes(key))), consentVersion: { type: "string", const: "privacy-2026-08-v1" }, privacyConsent: { type: "boolean", const: true }, submissionKey: { type: "string", minLength: 16, maxLength: 200 } }, ["application", "consentVersion", "privacyConsent", "submissionKey"]), success: [200, 201], errors: [400, 401, 404, 409, 410, 422, 500, 503] },
   "get /api/v1/agency/properties/:propertyId/applications": { response: dataOf({ applications: { type: "array", items: agencyApplicationListItem }, pagination: paginationMetadata }), errors: [400, 401, 403, 404, 500] },
-  "patch /api/v1/agency/applications/:applicationId/status": { body: object({ status: { type: "string", enum: ["new", "preselected", "selected", "rejected"] }, expectedStatus: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] } }, ["status", "expectedStatus"]) },
+  "patch /api/v1/agency/applications/:applicationId/status": { body: object({ status: { type: "string", enum: ["new", "preselected", "selected", "final_tenant", "rejected"] }, expectedStatus: { type: "string", enum: ["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"] } }, ["status", "expectedStatus"]) },
   "patch /api/v1/agency/applications/:applicationId/responsible-user": { body: object({ responsibleUserId: { type: ["string", "null"], format: "uuid" } }, ["responsibleUserId"]) },
   "post /api/v1/agency/applications/:applicationId/notes": { body: object({ body: { type: "string", minLength: 1, maxLength: 5000 } }, ["body"]), success: [201] },
   "post /api/v1/agency/applications/:applicationId/whatsapp": { body: object({ message: { type: "string", minLength: 1, maxLength: 2000 } }), bodyRequired: false },
@@ -237,7 +240,7 @@ const docs: Record<string, OperationDocumentation> = {
   "post /api/v1/agency/appointments": { body: object({ applicationId: uuid, startsAt: { type: "string", format: "date-time" }, durationMinutes: { type: "integer", minimum: 15, maximum: 480 }, responsibleUserId: { type: ["string", "null"], format: "uuid" }, instructions: { type: ["string", "null"], maxLength: 1000 }, internalNote: { type: ["string", "null"], maxLength: 2000 } }, ["applicationId", "startsAt", "durationMinutes"]), success: [200, 201] },
   "get /api/v1/agency/appointments": { response: dataOf({ appointments: { type: "array", items: appointmentDetail }, pagination: paginationMetadata }), errors: [400, 401, 403, 500] },
   "get /api/v1/agency/appointments/:appointmentId": { response: dataOf({ appointment: appointmentDetail }), errors: [400, 401, 403, 404, 500] },
-  "patch /api/v1/agency/appointments/:appointmentId": { body: { oneOf: [object({ action: { const: "reschedule" }, expectedUpdatedAt: { type: "string", format: "date-time" }, startsAt: { type: "string", format: "date-time" }, durationMinutes: { type: "integer", minimum: 15, maximum: 480 }, responsibleUserId: { type: ["string", "null"], format: "uuid" }, instructions: { type: ["string", "null"], maxLength: 1000 }, internalNote: { type: ["string", "null"], maxLength: 2000 } }, ["action", "expectedUpdatedAt", "startsAt"]), object({ action: { type: "string", enum: ["cancel", "complete", "no_show"] }, expectedUpdatedAt: { type: "string", format: "date-time" } }, ["action", "expectedUpdatedAt"])] } },
+  "patch /api/v1/agency/appointments/:appointmentId": { body: { oneOf: [object({ action: { const: "reschedule" }, expectedUpdatedAt: { type: "string", format: "date-time" }, startsAt: { type: "string", format: "date-time" }, durationMinutes: { type: "integer", minimum: 15, maximum: 480 }, responsibleUserId: { type: ["string", "null"], format: "uuid" }, instructions: { type: ["string", "null"], maxLength: 1000 }, internalNote: { type: ["string", "null"], maxLength: 2000 } }, ["action", "expectedUpdatedAt", "startsAt"]), object({ action: { type: "string", enum: ["cancel", "complete", "no_show", "archive", "unarchive"] }, expectedUpdatedAt: { type: "string", format: "date-time" } }, ["action", "expectedUpdatedAt"])] } },
   "delete /api/v1/agency/properties/:propertyId/public-link": { body: object({ expectedVersion: integer }, ["expectedVersion"]), success: [204] },
   "delete /api/v1/tenant/applications/:applicationId/documents/:documentId": { success: [204] },
   "post /api/v1/agency/team/invitations": { body: object({ email: { type: "string", format: "email", maxLength: 320 } }, ["email"]), success: [201], response: dataOf({ invitation: object({ email, role: { type: "string", enum: ["admin", "collaborator"] }, expiresAt: dateTime }, ["email", "role", "expiresAt"]), message: string, debugToken: string }, ["invitation", "message"]), errors: [400, 401, 403, 409, 500, 503] },
@@ -305,7 +308,7 @@ const queryParameters: Record<string, Array<Record<string, unknown>>> = {
   ],
   "get /api/v1/agency/properties/:propertyId/applications": [
     { in: "query", name: "search", schema: { type: "string", maxLength: 200 } },
-    { in: "query", name: "status", schema: { type: "string", enum: ["new", "preselected", "selected", "rejected", "withdrawn"] } },
+    { in: "query", name: "status", schema: { type: "string", enum: ["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"] } },
     { in: "query", name: "documentState", schema: { type: "string", enum: ["complete", "missing", "not_requested"] } },
     { in: "query", name: "viewingState", schema: { type: "string", enum: ["none", "scheduled", "completed"] } },
     { in: "query", name: "responsibleUserId", schema: uuid },
@@ -317,6 +320,7 @@ const queryParameters: Record<string, Array<Record<string, unknown>>> = {
   "get /api/v1/agency/appointments": [
     { in: "query", name: "state", schema: { type: "string", enum: ["scheduled", "completed", "cancelled", "no_show"] } },
     { in: "query", name: "scope", schema: { type: "string", enum: ["upcoming", "past"] } },
+    { in: "query", name: "archived", schema: { type: "string", enum: ["true", "false"] } },
     { in: "query", name: "from", schema: { type: "string", format: "date-time" } },
     { in: "query", name: "to", schema: { type: "string", format: "date-time" } },
   ],

@@ -5,12 +5,13 @@ import {
   CalendarCheck,
   Check,
   CheckCircle,
-  CopySimple,
   FileLock,
   FolderOpen,
+  HouseLine,
   LinkSimple,
   List,
   LockKey,
+  MapPin,
   NotePencil,
   ShieldCheck,
   UsersThree,
@@ -19,11 +20,6 @@ import {
 } from '@phosphor-icons/react'
 
 const faqItems = [
-  {
-    question: '¿El primer mes es realmente gratis?',
-    answer:
-      'Sí. Los planes Particular, Profesional e Inmobiliaria incluyen 30 días gratis. Se requiere tarjeta y puedes cancelar antes del primer cargo.',
-  },
   {
     question: '¿Puedo cancelar durante la prueba?',
     answer:
@@ -73,7 +69,7 @@ const pricingPlans = [
     name: 'Inmobiliaria',
     price: '99,99 €',
     description: 'Para inmobiliarias con una cartera y un equipo amplios.',
-    limits: ['Hasta 100 anuncios simultáneos', 'Cuentas ilimitadas'],
+    limits: ['Hasta 100 anuncios simultáneos', 'Cuentas ilimitadas para todo tu equipo'],
     featured: false,
   },
 ] as const
@@ -113,10 +109,11 @@ const workflow = [
   },
 ]
 
-const applicants = [
-  { initials: 'LM', name: 'Lucía Martín', detail: '3.450 € / mes', status: 'Nuevo' },
-  { initials: 'DR', name: 'Diego Ramos', detail: 'Documentación completa', status: 'Preseleccionado' },
-  { initials: 'SN', name: 'Sara Navarro', detail: 'Visita: 12/09, 18:30', status: 'Preseleccionado' },
+const previewApplicants = [
+  { initials: 'LM', name: 'Lucía Martín', detail: 'lucia.martin@email.es · 3.450 € / mes', status: 'Nuevo', tone: 'nuevo', avatar: 0 },
+  { initials: 'DR', name: 'Diego Ramos', detail: 'diego.ramos@email.es · Documentación completa', status: 'Preseleccionado', tone: 'preseleccionado', avatar: 1 },
+  { initials: 'SN', name: 'Sara Navarro', detail: 'sara.navarro@email.es · Visita: 12/09, 18:30', status: 'Seleccionado', tone: 'seleccionado', avatar: 2 },
+  { initials: 'CR', name: 'Claudia Reyes', detail: 'claudia.reyes@email.es · 4.500 € / mes', status: 'Nuevo', tone: 'nuevo', avatar: 0 },
 ]
 
 function Logo() {
@@ -179,66 +176,45 @@ function Header() {
   )
 }
 
-function ApplicantPreview() {
-  const [selected, setSelected] = useState('Todos')
-  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
-  const visibleApplicants = selected === 'Todos' ? applicants : applicants.filter((item) => item.status === selected)
-
-  const copyExampleLink = async () => {
-    try {
-      await navigator.clipboard.writeText('https://inquilink.es/solicitud/mad-024-demo')
-      setCopyState('copied')
-    } catch {
-      setCopyState('error')
-    }
-  }
-
+function ListingPreview() {
   return (
-    <div className="app-preview" aria-label="Ejemplo interactivo de candidatos">
-      <div className="preview-header">
-        <div>
-          <span className="preview-reference">MAD-024</span>
-          <h3>Ático luminoso en Chamberí</h3>
+    <div className="app-preview listing-preview" aria-label="Vista de un anuncio dentro de Inquilink">
+      <header className="listing-preview__header">
+        <span className="listing-preview__visual" aria-hidden="true">
+          <span className="listing-preview__sun" />
+          <span className="listing-preview__building listing-preview__building--back" />
+          <span className="listing-preview__building listing-preview__building--front" />
+          <HouseLine weight="duotone" />
+        </span>
+        <div className="listing-preview__identity">
+          <div>
+            <span className="listing-preview__reference">MAD-042</span>
+            <span className="listing-preview__badge listing-preview__badge--publicado">Publicado</span>
+          </div>
+          <h3>Piso luminoso en Chamberí</h3>
+          <p><MapPin aria-hidden="true" /> Calle de Galileo, 41, Madrid · 1.450 € / mes</p>
         </div>
-        <button type="button" className="icon-action" aria-label={copyState === 'copied' ? 'Enlace copiado' : 'Copiar enlace del inmueble'} onClick={copyExampleLink}>
-          {copyState === 'copied' ? <Check aria-hidden="true" /> : <CopySimple aria-hidden="true" />}
-        </button>
+        <div className="listing-preview__stats">
+          <span><strong>8</strong><small>interesados</small></span>
+          <span><strong>4</strong><small>nuevos</small></span>
+          <span><strong>5</strong><small>por revisar</small></span>
+        </div>
+      </header>
+      <div className="listing-preview__section">
+        <span><strong>Interesados</strong><small>4 resultados visibles</small></span>
       </div>
-      <div className="filter-row" aria-label="Filtrar candidatos">
-        {['Todos', 'Nuevo', 'Preseleccionado'].map((filter) => (
-          <button
-            type="button"
-            className={selected === filter ? 'filter-chip is-active' : 'filter-chip'}
-            aria-pressed={selected === filter}
-            onClick={() => setSelected(filter)}
-            key={filter}
-          >
-            {filter}
-          </button>
-        ))}
-      </div>
-      <div className="applicant-list" aria-live="polite">
-        {visibleApplicants.length > 0 ? visibleApplicants.map((applicant) => (
-          <article className="applicant-row" key={applicant.name}>
-            <span className="applicant-avatar" aria-hidden="true">{applicant.initials}</span>
-            <span className="applicant-person">
+      <ul className="listing-preview__list">
+        {previewApplicants.map((applicant) => (
+          <li key={applicant.name}>
+            <span className={`listing-preview__avatar listing-preview__avatar--${applicant.avatar}`} aria-hidden="true">{applicant.initials}</span>
+            <span className="listing-preview__person">
               <strong>{applicant.name}</strong>
               <small>{applicant.detail}</small>
             </span>
-            <span className="applicant-status">{applicant.status}</span>
-            <span className="quick-action" role="img" aria-label={`WhatsApp disponible para ${applicant.name}`}>
-              <WhatsappLogo aria-hidden="true" />
-            </span>
-          </article>
-        )) : (
-          <div className="preview-empty">
-            <UsersThree aria-hidden="true" />
-            <strong>No hay candidatos con este filtro</strong>
-            <button type="button" onClick={() => setSelected('Todos')}>Ver todos</button>
-          </div>
-        )}
-      </div>
-      {copyState === 'error' && <p className="preview-error" role="alert">No se pudo copiar el enlace. Inténtalo de nuevo.</p>}
+            <span className={`listing-preview__badge listing-preview__badge--${applicant.tone}`}>{applicant.status}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -274,12 +250,11 @@ export function HomePage() {
         <section className="hero" aria-labelledby="hero-title">
           <div className="page-shell hero-grid">
             <div className="hero-copy">
-              <p className="hero-eyebrow">El portal de inquilinos para inmobiliarias</p>
-              <h1 id="hero-title"><span>Miles de inquilinos.</span><span>Un solo portal.</span></h1>
+              <p className="hero-eyebrow">El Portal de Inquilinos para Inmobiliarias y Particulares</p>
+              <h1 id="hero-title"><span>Cientos de inquilinos.</span><span>Un solo portal.</span></h1>
               <p className="hero-support">Centraliza los interesados, la documentación y las visitas de cada inmueble en un único lugar.</p>
               <div className="hero-actions">
                 <a className="button button-dark button-large" href="/registro">Pruébalo ahora <ArrowRight aria-hidden="true" /></a>
-                <span>Primer mes gratis. Se requiere tarjeta.</span>
               </div>
             </div>
             <div className="hero-visual">
@@ -305,7 +280,7 @@ export function HomePage() {
 
         <section className="problem-section" aria-labelledby="problem-title">
           <div className="page-shell problem-layout">
-            <h2 id="problem-title">El interés por un inmueble no debería perderse entre pestañas.</h2>
+            <h2 id="problem-title">Ponle fin a cientos de llamadas dispersas. Llama únicamente a los interesados que tú elijas</h2>
             <div className="problem-video-slot" aria-label="Espacio reservado para un vídeo" />
           </div>
         </section>
@@ -314,7 +289,7 @@ export function HomePage() {
           <div className="page-shell">
             <div className="section-heading">
               <h2 id="workflow-title">Del anuncio a la visita, sin perder el hilo.</h2>
-              <p>Un proceso sencillo para organizar interesados de un inmueble desde el primer contacto.</p>
+              <p>Genera un enlace para tu inmueble. Comparte el enlace, y centraliza todos los datos de los interesados automáticamente</p>
             </div>
             <ol className="workflow-grid">
               {workflow.map(({ icon: Icon, title, text, image, fallback, alt }) => (
@@ -339,10 +314,10 @@ export function HomePage() {
             <div className="property-copy">
               <p className="section-kicker">Todo por inmueble</p>
               <h2 id="property-title">Una vista que responde antes de que tengas que buscar.</h2>
-              <p>Consulta contacto, ingresos, documentos, estado y próxima visita en el mismo lugar. Filtra la muestra para probarlo.</p>
+              <p>Consulta contacto, ingresos, documentos, estado y próxima visita en el mismo lugar. Así se ve cada anuncio dentro de Inquilink.</p>
               <a className="text-link" href="/registro">Organiza tu primer anuncio <ArrowRight aria-hidden="true" /></a>
             </div>
-            <ApplicantPreview />
+            <ListingPreview />
           </div>
         </section>
 
@@ -421,9 +396,7 @@ export function HomePage() {
         <section className="pricing-section section-space" id="precios" aria-labelledby="pricing-title">
           <div className="page-shell">
             <div className="section-heading pricing-heading">
-              <p className="section-kicker">Precios claros</p>
               <h2 id="pricing-title">Prueba el flujo completo durante 30 días.</h2>
-              <p>Primer mes gratis. Se requiere tarjeta. El plan elegido empieza automáticamente el día 31 si no cancelas.</p>
             </div>
             <div className="pricing-grid">
               {pricingPlans.map((plan) => <PricingCard plan={plan} key={plan.id} />)}
@@ -468,7 +441,7 @@ export function HomePage() {
         <section className="final-cta section-space" aria-labelledby="final-title">
           <div className="page-shell final-cta-inner">
             <div>
-              <h2 id="final-title">Miles de inquilinos. Un solo portal.</h2>
+              <h2 id="final-title">Cientos de inquilinos. Un solo portal.</h2>
               <p>Empieza a organizar cada candidato desde su inmueble.</p>
             </div>
             <a className="button button-dark button-large" href="/registro">Pruébalo ahora <ArrowRight aria-hidden="true" /></a>
@@ -478,7 +451,7 @@ export function HomePage() {
 
       <footer className="site-footer">
         <div className="page-shell footer-grid">
-          <div className="footer-brand"><Logo /><p>Gestión de inquilinos para inmobiliarias.</p></div>
+          <div className="footer-brand"><Logo /><p>El Portal de Inquilinos para Inmobiliarias y Particulares.</p></div>
           <div><h2>Producto</h2><a href="#como-funciona">Cómo funciona</a><a href="#funciones">Funciones</a><a href="/precios">Precios</a></div>
           <div><h2>Acceso</h2><a href="/iniciar-sesion">Iniciar sesión</a><a href="/registro">Pruébalo ahora</a></div>
           <div><h2>Legal</h2><a href="/legal/privacidad">Privacidad</a><a href="/legal/terminos">Términos</a><a href="/legal/cookies">Cookies</a></div>

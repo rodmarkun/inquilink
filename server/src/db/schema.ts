@@ -26,7 +26,7 @@ export const userKind = pgEnum("user_kind", ["agency", "tenant"]);
 export const agencyRole = pgEnum("agency_role", ["admin", "collaborator"]);
 export const tokenKind = pgEnum("token_kind", ["verify_email", "reset_password"]);
 export const propertyState = pgEnum("property_state", ["draft", "published", "paused", "archived"]);
-export const applicationStatus = pgEnum("application_status", ["new", "preselected", "selected", "rejected", "withdrawn"]);
+export const applicationStatus = pgEnum("application_status", ["new", "preselected", "selected", "rejected", "withdrawn", "final_tenant"]);
 export const documentState = pgEnum("document_state", ["complete", "missing", "not_requested"]);
 export const appointmentState = pgEnum("appointment_state", ["scheduled", "completed", "cancelled", "no_show"]);
 export const planCode = pgEnum("plan_code", ["particular", "professional", "inmobiliaria"]);
@@ -346,6 +346,7 @@ export const appointments = pgTable("appointments", {
   startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
   durationMinutes: integer("duration_minutes").notNull(),
   state: appointmentState("state").notNull().default("scheduled"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
   instructions: text("instructions"),
   internalNote: text("internal_note"),
   idempotencyKeyHash: varchar("idempotency_key_hash", { length: 64 }),

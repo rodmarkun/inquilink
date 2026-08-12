@@ -41,8 +41,8 @@ import {
 } from "./spanish-market.js";
 
 const propertyStates = ["draft", "published", "paused", "archived"] as const;
-const applicantStatuses = ["new", "preselected", "selected", "rejected", "withdrawn"] as const;
-const agencyApplicantStatuses = ["new", "preselected", "selected", "rejected"] as const;
+const applicantStatuses = ["new", "preselected", "selected", "final_tenant", "rejected", "withdrawn"] as const;
+const agencyApplicantStatuses = ["new", "preselected", "selected", "final_tenant", "rejected"] as const;
 const documentStates = ["complete", "missing", "not_requested"] as const;
 const documentCategories = DOCUMENT_CATEGORIES;
 const appointmentStates = ["scheduled", "completed", "cancelled", "no_show"] as const;
@@ -1385,9 +1385,11 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
 
   app.get("/api/v1/agency/appointments", { schema: { tags: ["Agencia"], summary: "Listar citas" } }, async (request) => {
     const { agency } = requireAgency(request);
-    const query = z.object({ state: z.enum(appointmentStates).optional(), scope: z.enum(["upcoming", "past"]).optional(), from: z.iso.datetime({ offset: true }).optional(), to: z.iso.datetime({ offset: true }).optional(), ...paginationQuery }).parse(request.query);
+    const query = z.object({ state: z.enum(appointmentStates).optional(), scope: z.enum(["upcoming", "past"]).optional(), archived: z.enum(["true", "false"]).optional(), from: z.iso.datetime({ offset: true }).optional(), to: z.iso.datetime({ offset: true }).optional(), ...paginationQuery }).parse(request.query);
     const clauses = [eq(appointments.agencyId, agency.id)];
     if (query.state) clauses.push(eq(appointments.state, query.state));
+    if (query.archived === "true") clauses.push(isNotNull(appointments.archivedAt));
+    if (query.archived === "false") clauses.push(isNull(appointments.archivedAt));
     if (query.from) clauses.push(gte(appointments.startsAt, new Date(query.from)));
     if (query.to) clauses.push(lte(appointments.startsAt, new Date(query.to)));
     if (query.scope === "upcoming") clauses.push(and(eq(appointments.state, "scheduled"), gte(appointments.startsAt, nowFor(deps)))!);
@@ -1445,7 +1447,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     if (startsAt <= nowFor(deps)) throw new ApiError(422, "APPOINTMENT_IN_PAST", "La cita debe programarse en una fecha futura.");
     let warnings: Awaited<ReturnType<typeof overlapWarnings>> = [];
     const createdAt = nowFor(deps);
-    const appointment = { id: newId(), agencyId: agency.id, propertyId: application.propertyId, applicationId: application.id, responsibleUserId: input.responsibleUserId, startsAt, durationMinutes: input.durationMinutes, state: "scheduled" as const, instructions: input.instructions, internalNote: input.internalNote, idempotencyKeyHash, requestFingerprint, createdAt, updatedAt: createdAt };
+    const appointment = { id: newId(), agencyId: agency.id, propertyId: application.propertyId, applicationId: application.id, responsibleUserId: input.responsibleUserId, startsAt, durationMinutes: input.durationMinutes, state: "scheduled" as const, archivedAt: null, instructions: input.instructions, internalNote: input.internalNote, idempotencyKeyHash, requestFingerprint, createdAt, updatedAt: createdAt };
     let persistedAppointment: typeof appointments.$inferSelect = appointment;
     let idempotentReplay = false;
     await options.beforeAgencyWrite?.("appointment");
@@ -1520,13 +1522,26 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     const input = z.discriminatedUnion("action", [
       z.object({ action: z.literal("reschedule"), expectedUpdatedAt: z.iso.datetime({ offset: true }), startsAt: z.iso.datetime({ offset: true }), durationMinutes: z.number().int().min(15).max(480).optional(), responsibleUserId: z.string().uuid().nullable().optional(), instructions: z.string().trim().max(1_000).nullable().optional(), internalNote: z.string().trim().max(2_000).nullable().optional() }),
       z.object({ action: z.literal("cancel"), expectedUpdatedAt: z.iso.datetime({ offset: true }) }), z.object({ action: z.literal("complete"), expectedUpdatedAt: z.iso.datetime({ offset: true }) }), z.object({ action: z.literal("no_show"), expectedUpdatedAt: z.iso.datetime({ offset: true }) }),
+      z.object({ action: z.literal("archive"), expectedUpdatedAt: z.iso.datetime({ offset: true }) }), z.object({ action: z.literal("unarchive"), expectedUpdatedAt: z.iso.datetime({ offset: true }) }),
     ]).parse(request.body);
-    if (appointment.state !== "scheduled") throw new ApiError(409, "APPOINTMENT_FINAL", "Esta cita ya está cerrada y no puede modificarse.");
+    const archiveAction = input.action === "archive" || input.action === "unarchive";
+    if (!archiveAction && appointment.state !== "scheduled") throw new ApiError(409, "APPOINTMENT_FINAL", "Esta cita ya está cerrada y no puede modificarse.");
     const requestTime = nowFor(deps);
     const changedAt = new Date(Math.max(requestTime.getTime(), appointment.updatedAt.getTime() + 1));
     let warnings: Awaited<ReturnType<typeof overlapWarnings>> = [];
     await options.beforeAgencyWrite?.("appointment");
-    if (input.action === "reschedule") {
+    if (input.action === "archive" || input.action === "unarchive") {
+      if (input.action === "archive" && appointment.state === "scheduled") throw new ApiError(409, "APPOINTMENT_NOT_ARCHIVABLE", "Solo se pueden archivar citas completadas, canceladas o con ausencia registrada.");
+      if (input.action === "archive" && appointment.archivedAt) throw new ApiError(409, "APPOINTMENT_ALREADY_ARCHIVED", "Esta cita ya está archivada.");
+      if (input.action === "unarchive" && !appointment.archivedAt) throw new ApiError(409, "APPOINTMENT_NOT_ARCHIVED", "Esta cita no está archivada.");
+      await deps.db.transaction(async (tx) => {
+        await lockActiveAgency(tx as unknown as Database, agency.id, { userId: user.id });
+        const updated = await tx.update(appointments).set({ archivedAt: input.action === "archive" ? changedAt : null, updatedAt: changedAt })
+          .where(and(eq(appointments.id, appointmentId), eq(appointments.agencyId, agency.id), input.action === "archive" ? isNull(appointments.archivedAt) : isNotNull(appointments.archivedAt), eq(appointments.updatedAt, new Date(input.expectedUpdatedAt)))).returning({ id: appointments.id });
+        if (!updated[0]) throw new ApiError(409, "APPOINTMENT_CHANGED", "La cita ha cambiado. Actualiza la vista antes de volver a intentarlo.");
+        await tx.insert(auditEvents).values({ id: newId(), agencyId: agency.id, actorUserId: user.id, action: `appointment_${input.action}`, subjectType: "appointment", subjectId: appointmentId, metadata: { applicationId: appointment.applicationId, propertyId: appointment.propertyId }, createdAt: changedAt });
+      });
+    } else if (input.action === "reschedule") {
       const responsibleUserId = input.responsibleUserId === undefined ? appointment.responsibleUserId : input.responsibleUserId;
       if (responsibleUserId) await assertAgencyMember(deps.db, agency.id, responsibleUserId);
       const startsAt = new Date(input.startsAt);

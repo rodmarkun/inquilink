@@ -1,5 +1,5 @@
 import { type FormEvent, useEffect, useRef, useState } from 'react'
-import { CheckCircle, Image, Plus, SignOut, SpinnerGap, UploadSimple, UserPlus, Warning } from '@phosphor-icons/react'
+import { CheckCircle, Plus, SignOut, SpinnerGap, UserPlus, Warning } from '@phosphor-icons/react'
 import './FunnelControls.css'
 
 type ApiErrorPayload = { error?: { code?: string; message?: string } }
@@ -130,29 +130,14 @@ function fileAsBase64(file: File): Promise<string> {
   })
 }
 
-export function PropertyCoverUpload({ propertyId, currentUrl, onUploaded }: { propertyId: string; currentUrl: string | null; onUploaded?: (result: { coverImageUrl: string; version: number }) => void }) {
-  const [url, setUrl] = useState(currentUrl)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  useEffect(() => setUrl(currentUrl), [currentUrl])
-  const upload = async (file: File | undefined) => {
-    if (!file) return
-    if (!['image/jpeg', 'image/png'].includes(file.type)) { setError('Selecciona una imagen JPG o PNG.'); return }
-    setBusy(true); setError('')
-    try {
-      const dataBase64 = await fileAsBase64(file)
-      const response = await fetch(`/api/v1/agency/properties/${encodeURIComponent(propertyId)}/cover-image`, { method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ originalName: file.name, contentType: file.type, dataBase64 }) })
-      if (!response.ok) throw await responseError(response, 'No hemos podido subir la imagen.')
-      const payload = await response.json() as { data?: { coverImageUrl?: string; version?: number } }
-      if (!payload.data?.coverImageUrl || !payload.data.version) throw new Error('No hemos podido confirmar la imagen.')
-      setUrl(payload.data.coverImageUrl); onUploaded?.({ coverImageUrl: payload.data.coverImageUrl, version: payload.data.version })
-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'No hemos podido subir la imagen.') } finally { setBusy(false) }
-  }
-  return <div className="funnel-cover-upload">
-    <div className="funnel-cover-upload__preview">{url ? <img src={url} alt="Vista previa de la portada" /> : <Image size={26} aria-hidden="true" />}</div>
-    <span><strong>Imagen de portada</strong><small>JPG o PNG. La comprobamos antes de publicarla.</small>{error && <em role="alert">{error}</em>}</span>
-    <label className="funnel-upload-button"><UploadSimple size={17} />{busy ? 'Subiendo…' : url ? 'Cambiar imagen' : 'Subir imagen'}<input type="file" accept="image/jpeg,image/png" disabled={busy} onChange={(event) => { void upload(event.target.files?.[0]); event.currentTarget.value = '' }} /></label>
-  </div>
+export async function uploadPropertyCoverImage(propertyId: string, file: File): Promise<{ coverImageUrl: string; version: number }> {
+  if (!['image/jpeg', 'image/png'].includes(file.type)) throw new Error('Selecciona una imagen JPG o PNG.')
+  const dataBase64 = await fileAsBase64(file)
+  const response = await fetch(`/api/v1/agency/properties/${encodeURIComponent(propertyId)}/cover-image`, { method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ originalName: file.name, contentType: file.type, dataBase64 }) })
+  if (!response.ok) throw await responseError(response, 'No hemos podido subir la imagen.')
+  const payload = await response.json() as { data?: { coverImageUrl?: string; version?: number } }
+  if (!payload.data?.coverImageUrl || !payload.data.version) throw new Error('No hemos podido confirmar la imagen.')
+  return { coverImageUrl: payload.data.coverImageUrl, version: payload.data.version }
 }
 
 type TeamMember = { userId: string; fullName: string; email: string; role: 'admin' | 'collaborator'; joinedAt: string }

@@ -51,7 +51,7 @@ const plans = {
     description: 'Para inmobiliarias con una cartera y un equipo amplios.',
     features: [
       'Hasta 100 anuncios simultáneos',
-      'Cuentas ilimitadas',
+      'Cuentas ilimitadas para todo tu equipo',
       'Todas las funciones de Inquilink',
     ],
   },
@@ -227,7 +227,6 @@ function PricingPage() {
       <PublicHeader />
       <main id="contenido" className="ab-pricing-main">
         <section className="ab-pricing-intro">
-          <span className="ab-eyebrow">Precios claros desde el principio</span>
           <h1>Un plan para ordenar cada alquiler.</h1>
           <p>Prueba todas las funciones durante 30 días. Añade tu tarjeta ahora y no pagarás nada hoy.</p>
         </section>
@@ -254,7 +253,6 @@ function PricingPage() {
                 </div>
                 <p className="ab-plan-description">{plan.description}</p>
                 <p className="ab-price"><strong>{plan.price}</strong><span>/ mes</span></p>
-                <p className="ab-free-line"><Sparkle size={18} weight="fill" aria-hidden="true" /> Primer mes gratis (30 días)</p>
                 <ul className="ab-feature-list">
                   {plan.features.map((feature) => (
                     <li key={feature}><CheckCircle size={20} weight="fill" aria-hidden="true" />{feature}</li>
@@ -1095,7 +1093,7 @@ function InvitationAcceptancePage() {
 type TenantApplicationItem = {
   application: {
     id: string
-    status: 'new' | 'preselected' | 'selected' | 'rejected' | 'withdrawn'
+    status: 'new' | 'preselected' | 'selected' | 'final_tenant' | 'rejected' | 'withdrawn'
     documentState: 'complete' | 'missing' | 'not_requested'
     submittedAt: string | null
     updatedAt: string
@@ -1112,6 +1110,7 @@ const tenantStatusLabels: Record<TenantApplicationItem['application']['status'],
   new: 'Nueva',
   preselected: 'Preseleccionada',
   selected: 'Seleccionada',
+  final_tenant: 'Inquilino final',
   rejected: 'No seleccionada',
   withdrawn: 'Retirada',
 }
