@@ -38,6 +38,7 @@ const subjects: Record<EmailTemplateName, { subject: string; preview: string }> 
   team_invitation: { subject: "Te han invitado a un equipo de Inquilink", preview: "Acepta la invitación para colaborar con tu agencia." },
   verify_email: { subject: "Verifica tu cuenta de Inquilink", preview: "Confirma tu correo para continuar en Inquilink." },
   reset_password: { subject: "Restablece tu contraseña de Inquilink", preview: "Usa este enlace seguro para crear una nueva contraseña." },
+  guest_application_otp: { subject: "Código para enviar tu solicitud", preview: "Verifica tu correo para enviar la solicitud." },
   application_received: { subject: "Hemos recibido tu solicitud", preview: "Tu solicitud ya está disponible en tu cuenta de Inquilink." },
   viewing_created: { subject: "Tu visita ha sido agendada", preview: "Consulta la fecha y la hora de tu próxima visita." },
   viewing_rescheduled: { subject: "Tu visita ha cambiado", preview: "Consulta la nueva fecha y hora de tu visita." },
@@ -70,6 +71,9 @@ export function renderEmail(rawMessage: EmailMessage, appOrigin: string): Render
       break;
     case "reset_password":
       text = `Crea una nueva contraseña desde ${safeAppLink(appOrigin, `/restablecer-contrasena?token=${encodeURIComponent(variables.token!)}&volver=${encodeURIComponent(variables.returnPath!)}`)}.`;
+      break;
+    case "guest_application_otp":
+      text = `Tu código para enviar la solicitud de ${variables.propertyTitle} es ${variables.code}. Caduca en 10 minutos.`;
       break;
     case "application_received":
       text = `${variables.agencyName} ha recibido tu solicitud para ${variables.propertyTitle}. Puedes consultar su estado desde tu cuenta.`;

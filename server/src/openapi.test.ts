@@ -106,6 +106,18 @@ it("generates a valid OpenAPI 3.1 contract for operational workflows", async () 
   expect(document.paths["/api/v1/auth/reset-password"].post.responses).not.toHaveProperty("409");
   expect(document.paths["/api/v1/auth/reset-password"].post.responses).not.toHaveProperty("429");
   expect(document.paths["/api/v1/public/properties/{token}"].get.responses).toHaveProperty("410");
+  const guestOtp = document.paths["/api/v1/public/applications/by-link/{token}/request-otp"].post;
+  expect(guestOtp.security).toEqual([]);
+  expect(guestOtp.requestBody.content["application/json"].schema.required).toEqual(["email"]);
+  expect(Object.keys(guestOtp.responses).sort()).toEqual(["200", "400", "404", "410", "429", "500", "503"]);
+  const guestSubmit = document.paths["/api/v1/public/applications/by-link/{token}/submit"].post;
+  expect(guestSubmit.security).toEqual([]);
+  expect(guestSubmit.requestBody.content["application/json"].schema.required).toEqual(["email", "otp", "application", "consentVersion", "privacyConsent", "submissionKey"]);
+  expect(guestSubmit.responses).toHaveProperty("201");
+  const setPassword = document.paths["/api/v1/tenant/account/set-password"].post;
+  expect(setPassword.security).toEqual([{ sessionCookie: [] }]);
+  expect(setPassword.requestBody.content["application/json"].schema.properties.termsVersion.const).toBe("terms-2026-08-v1");
+  expect(setPassword.responses).toHaveProperty("409");
   expect(document.paths["/api/v1/tenant/application-drafts/by-link/{token}"].get.responses).toHaveProperty("410");
   expect(document.paths["/api/v1/tenant/application-drafts/by-link/{token}"].put.responses).toHaveProperty("410");
   expect(document.paths["/api/v1/tenant/applications/by-link/{token}/submit"].post.responses).toHaveProperty("410");

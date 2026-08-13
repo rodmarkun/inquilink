@@ -53,6 +53,7 @@ const variables: Record<(typeof emailTemplateNames)[number], Record<string, stri
   team_invitation: { token: "token-super-seguro-de-invitacion", agencyName: "Agencia Centro" },
   verify_email: { token: "token-super-seguro-de-verificacion", returnPath: "/solicitud/abc" },
   reset_password: { token: "token-super-seguro-de-recuperacion", returnPath: "/solicitud/abc" },
+  guest_application_otp: { code: "012345", propertyTitle: "Piso de Lucía" },
   application_received: { propertyTitle: "Piso de Lucía", agencyName: "Agencia Centro" },
   viewing_created: { startsAt: "2026-08-09T10:00:00.000Z" },
   viewing_rescheduled: { startsAt: "2026-08-10T10:00:00.000Z" },

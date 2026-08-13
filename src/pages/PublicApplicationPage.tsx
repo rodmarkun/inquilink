@@ -16,7 +16,6 @@ import {
   MapPin,
   ShieldCheck,
   Trash,
-  UserCircle,
 } from '@phosphor-icons/react'
 import './PublicApplicationPage.css'
 
@@ -85,7 +84,17 @@ type PublicProperty = {
   consentVersion: string
 }
 
-type ApiErrorPayload = { error?: { code?: string; message?: string } }
+type ApiErrorPayload = { error?: { code?: string; message?: string; details?: { attemptsRemaining?: number } } }
+
+type GuestSubmitPayload = ApiErrorPayload & {
+  data?: {
+    applicationId?: string
+    accountUpgradeAvailable?: boolean
+    documentsRequired?: boolean
+    missingCategories?: DocumentCategory[]
+    missingByAdult?: Array<{ adultProfileId: string; categories: DocumentCategory[] }>
+  }
+}
 
 const categoryByKey: Record<DocumentKey, DocumentCategory> = {
   payslips: 'payslips',
@@ -169,6 +178,14 @@ function apiError(payload: ApiErrorPayload, fallback: string) {
   return payload.error?.message ?? fallback
 }
 
+function clearLocalDraft(key: string) {
+  try {
+    window.localStorage.removeItem(key)
+  } catch {
+    // A completed submission must not be reported as failed if storage is unavailable.
+  }
+}
+
 function formToApi(data: FormData) {
   const contactChannels: Record<string, 'whatsapp' | 'phone' | 'email'> = { WhatsApp: 'whatsapp', 'Teléfono': 'phone', 'Correo electrónico': 'email' }
   const yesNo: Record<string, 'yes' | 'no'> = { 'Sí': 'yes', No: 'no' }
@@ -242,6 +259,7 @@ function RequiredMark() {
 
 export function PublicApplicationPage() {
   const token = window.location.pathname.split('/').filter(Boolean).at(-1) ?? ''
+  const localDraftKey = `inquilink-guest-draft:${token}`
   const [step, setStep] = useState(0)
   const [data, setData] = useState<FormData>(initialData)
   const [documents, setDocuments] = useState<Documents>(initialDocuments)
@@ -257,15 +275,27 @@ export function PublicApplicationPage() {
   const [submitted, setSubmitted] = useState(false)
   const [restored, setRestored] = useState(false)
   const [accountReady, setAccountReady] = useState(false)
-  const [accountMode, setAccountMode] = useState<'register' | 'login'>('register')
-  const [accountName, setAccountName] = useState('')
-  const [accountEmail, setAccountEmail] = useState('')
-  const [accountPassword, setAccountPassword] = useState('')
-  const [accountErrors, setAccountErrors] = useState<Record<string, string>>({})
-  const [accountSubmitting, setAccountSubmitting] = useState(false)
-  const [verificationSent, setVerificationSent] = useState(false)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [agencyNotice, setAgencyNotice] = useState(false)
+  const [documentsHandoffNotice, setDocumentsHandoffNotice] = useState(false)
+  const [website, setWebsite] = useState('')
+  const [otpActive, setOtpActive] = useState(false)
+  const [otp, setOtp] = useState('')
+  const [otpError, setOtpError] = useState('')
+  const [otpAttemptsRemaining, setOtpAttemptsRemaining] = useState<number | null>(null)
+  const [otpCooldown, setOtpCooldown] = useState(0)
+  const [otpSending, setOtpSending] = useState(false)
+  const [accountUpgradeAvailable, setAccountUpgradeAvailable] = useState(false)
+  const [upgradePassword, setUpgradePassword] = useState('')
+  const [upgradeTermsAccepted, setUpgradeTermsAccepted] = useState(false)
+  const [upgradeError, setUpgradeError] = useState('')
+  const [upgradeSubmitting, setUpgradeSubmitting] = useState(false)
+  const [upgradeComplete, setUpgradeComplete] = useState(false)
+  const formStartedAtRef = useRef(Date.now())
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const otpHeadingRef = useRef<HTMLHeadingElement>(null)
   const successHeadingRef = useRef<HTMLHeadingElement>(null)
+  const upgradeHeadingRef = useRef<HTMLHeadingElement>(null)
   const errorSummaryRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -279,16 +309,22 @@ export function PublicApplicationPage() {
         setProperty(payload.data.property)
         setPropertyState('ready')
 
-        const meResponse = await fetch('/api/v1/auth/me', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
-        if (!meResponse.ok) return
-        const mePayload = await meResponse.json() as { data?: { user?: { kind?: string; email?: string; fullName?: string } } }
-        if (mePayload.data?.user?.kind !== 'tenant') {
-          setAccountErrors({ form: 'Cierra la sesión de agencia e inicia sesión con una cuenta de inquilino.' })
-          return
+        try {
+          const meResponse = await fetch('/api/v1/auth/me', { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal })
+          if (meResponse.ok) {
+            const mePayload = await meResponse.json() as { data?: { user?: { kind?: string; email?: string; fullName?: string } } }
+            if (mePayload.data?.user?.kind === 'tenant') {
+              setData((current) => ({ ...current, email: mePayload.data?.user?.email ?? current.email, fullName: mePayload.data?.user?.fullName ?? current.fullName }))
+              setAccountReady(true)
+            } else if (mePayload.data?.user?.kind === 'agency') {
+              setAgencyNotice(true)
+            }
+          }
+        } catch {
+          // An unavailable or absent session keeps this visitor on the guest path.
+        } finally {
+          if (!controller.signal.aborted) setAuthChecked(true)
         }
-        setAccountEmail(mePayload.data.user.email ?? '')
-        setData((current) => ({ ...current, email: mePayload.data?.user?.email ?? current.email, fullName: mePayload.data?.user?.fullName ?? current.fullName }))
-        setAccountReady(true)
       } catch (caught) {
         if (controller.signal.aborted) return
         setPageError(caught instanceof Error ? caught.message : 'No hemos podido cargar este anuncio.')
@@ -298,6 +334,32 @@ export function PublicApplicationPage() {
     void load()
     return () => controller.abort()
   }, [token])
+
+  useEffect(() => {
+    if (!authChecked || accountReady || !property || submitted) return
+    setDraftReady(false)
+    try {
+      const stored = window.localStorage.getItem(localDraftKey)
+      if (stored) {
+        const parsed = JSON.parse(stored) as Partial<FormData>
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          setData((current) => ({
+            ...current,
+            ...parsed,
+            privacyConsent: false,
+            availability: Array.isArray(parsed.availability) ? parsed.availability : current.availability,
+            additionalAdults: Array.isArray(parsed.additionalAdults) ? parsed.additionalAdults : current.additionalAdults,
+          }))
+          setRestored(true)
+          setSaveState('saved')
+        }
+      }
+    } catch {
+      clearLocalDraft(localDraftKey)
+    } finally {
+      setDraftReady(true)
+    }
+  }, [accountReady, authChecked, localDraftKey, property, submitted])
 
   useEffect(() => {
     if (!accountReady || !property || submitted) return
@@ -355,16 +417,45 @@ export function PublicApplicationPage() {
   }, [accountReady, data, draftReady, property, step, submitted, token])
 
   useEffect(() => {
+    if (!authChecked || accountReady || !property || !draftReady || submitted) return
+    const timer = window.setTimeout(() => {
+      setSaveState('saving')
+      try {
+        window.localStorage.setItem(localDraftKey, JSON.stringify({ ...data, privacyConsent: false }))
+        setSaveState('saved')
+      } catch {
+        setSaveState('error')
+        setPageError('No hemos podido guardar el progreso en este dispositivo.')
+      }
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [accountReady, authChecked, data, draftReady, localDraftKey, property, step, submitted])
+
+  useEffect(() => {
     if (!submitted) headingRef.current?.focus()
   }, [step, submitted])
+
+  useEffect(() => {
+    if (otpActive) otpHeadingRef.current?.focus()
+  }, [otpActive])
+
+  useEffect(() => {
+    if (otpCooldown <= 0) return
+    const timer = window.setTimeout(() => setOtpCooldown((current) => Math.max(0, current - 1)), 1_000)
+    return () => window.clearTimeout(timer)
+  }, [otpCooldown])
 
   useEffect(() => {
     if (submitted) successHeadingRef.current?.focus()
   }, [submitted])
 
   useEffect(() => {
-    if (Object.keys(errors).length > 0 || fileError) errorSummaryRef.current?.focus()
-  }, [errors, fileError])
+    if (upgradeComplete) upgradeHeadingRef.current?.focus()
+  }, [upgradeComplete])
+
+  useEffect(() => {
+    if (Object.keys(errors).length > 0 || fileError || pageError) errorSummaryRef.current?.focus()
+  }, [errors, fileError, pageError])
 
   const updateField = (field: keyof FormData, value: string | boolean | string[]) => {
     setData((current) => ({ ...current, [field]: value }))
@@ -429,7 +520,7 @@ export function PublicApplicationPage() {
       }
     }
 
-    if (step === 3) {
+    if (step === 3 && accountReady) {
       for (const category of property?.requestedDocumentCategories ?? []) {
         const key = keyByCategory[category]
         for (const adultProfileId of ['primary', ...data.additionalAdults.map((adult) => adult.id)]) {
@@ -532,56 +623,164 @@ export function PublicApplicationPage() {
     } catch (caught) { setFileError(caught instanceof Error ? caught.message : 'No hemos podido eliminar el archivo.') }
   }
 
+  const submissionKeyForProperty = () => {
+    const submissionStorageKey = `inquilink-submission:${property!.id}`
+    const submissionKey = window.sessionStorage.getItem(submissionStorageKey) ?? crypto.randomUUID()
+    window.sessionStorage.setItem(submissionStorageKey, submissionKey)
+    return submissionKey
+  }
+
+  const requestOtp = async () => {
+    if (!property || otpSending) return false
+    setOtpSending(true)
+    setOtpError('')
+    setOtpAttemptsRemaining(null)
+    setPageError('')
+    try {
+      const response = await fetch(`/api/v1/public/applications/by-link/${encodeURIComponent(token)}/request-otp`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: data.email.trim().toLowerCase(), website, formElapsedMs: Date.now() - formStartedAtRef.current }),
+      })
+      const payload = await response.json().catch(() => ({})) as ApiErrorPayload
+      if (!response.ok) throw new Error(apiError(payload, 'No hemos podido enviar el código. Inténtalo de nuevo.'))
+      setOtp('')
+      setOtpActive(true)
+      setOtpCooldown(60)
+      return true
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'No hemos podido enviar el código. Inténtalo de nuevo.'
+      if (otpActive) setOtpError(message)
+      else setPageError(message)
+      return false
+    } finally {
+      setOtpSending(false)
+    }
+  }
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
-    if (!validateStep() || isSubmitting || !property) return
+    if (!validateStep() || isSubmitting || otpSending || !property) return
+
+    if (!accountReady) {
+      await requestOtp()
+      return
+    }
+
     setIsSubmitting(true)
     setPageError('')
     try {
-      const submissionStorageKey = `inquilink-submission:${property.id}`
-      const submissionKey = window.sessionStorage.getItem(submissionStorageKey) ?? crypto.randomUUID()
-      window.sessionStorage.setItem(submissionStorageKey, submissionKey)
+      const submissionKey = submissionKeyForProperty()
       const response = await fetch(`/api/v1/tenant/applications/by-link/${encodeURIComponent(token)}/submit`, {
         method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Idempotency-Key': submissionKey },
         body: JSON.stringify({ application: formToApi(data), consentVersion: property.consentVersion, privacyConsent: true, submissionKey }),
       })
       const payload = await response.json().catch(() => ({})) as ApiErrorPayload
       if (!response.ok) throw new Error(apiError(payload, 'No hemos podido enviar la solicitud.'))
-      setIsSubmitting(false)
+      clearLocalDraft(localDraftKey)
       setSubmitted(true)
       window.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (caught) {
-      setIsSubmitting(false)
       setPageError(caught instanceof Error ? caught.message : 'No hemos podido enviar la solicitud.')
       errorSummaryRef.current?.focus()
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
-  const handleAccountSubmit = async (event: FormEvent) => {
+  const handleOtpSubmit = async (event: FormEvent) => {
     event.preventDefault()
-    const nextErrors: Record<string, string> = {}
+    if (!property || isSubmitting) return
+    if (!/^\d{6}$/.test(otp)) {
+      setOtpError('Introduce el código de 6 dígitos que hemos enviado a tu correo.')
+      return
+    }
 
-    if (accountMode === 'register' && !accountName.trim()) nextErrors.name = 'Escribe tu nombre y apellidos.'
-    if (!/^\S+@\S+\.\S+$/.test(accountEmail)) nextErrors.email = 'Introduce un correo electrónico válido.'
-    if (accountPassword.length < 10) nextErrors.password = 'La contraseña debe tener al menos 10 caracteres.'
-
-    setAccountErrors(nextErrors)
-    if (Object.keys(nextErrors).length > 0) return
-    setAccountSubmitting(true)
+    setIsSubmitting(true)
+    setOtpError('')
+    setOtpAttemptsRemaining(null)
     try {
-      const endpoint = accountMode === 'register' ? '/api/v1/auth/tenant/register' : '/api/v1/auth/login'
-      const body = accountMode === 'register'
-        ? { fullName: accountName.trim(), email: accountEmail.trim(), password: accountPassword, termsAccepted: true, termsVersion: 'terms-2026-08-v1', returnPath: `/solicitud/${token}` }
-        : { email: accountEmail.trim(), password: accountPassword, accountType: 'tenant', returnPath: `/solicitud/${token}` }
-      const response = await fetch(endpoint, { method: 'POST', credentials: 'include', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      const payload = await response.json().catch(() => ({})) as ApiErrorPayload
-      if (!response.ok) throw new Error(apiError(payload, 'No hemos podido acceder a tu cuenta.'))
-      if (accountMode === 'register') { setVerificationSent(true); return }
-      setData((current) => ({ ...current, email: accountEmail.trim().toLowerCase() }))
-      setAccountReady(true)
+      const submissionKey = submissionKeyForProperty()
+      const response = await fetch(`/api/v1/public/applications/by-link/${encodeURIComponent(token)}/submit`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Idempotency-Key': submissionKey },
+        body: JSON.stringify({
+          email: data.email.trim().toLowerCase(),
+          otp,
+          application: formToApi(data),
+          consentVersion: property.consentVersion,
+          privacyConsent: true,
+          submissionKey,
+          website,
+        }),
+      })
+      const payload = await response.json().catch(() => ({})) as GuestSubmitPayload
+      if (!response.ok) {
+        const code = payload.error?.code
+        const attemptsRemaining = payload.error?.details?.attemptsRemaining
+        setOtpAttemptsRemaining(typeof attemptsRemaining === 'number' ? attemptsRemaining : null)
+        const message = apiError(payload, 'No hemos podido verificar el código.')
+        setOtpError(code === 'OTP_INVALID' && attemptsRemaining === undefined ? `${message} Solicita un código nuevo para continuar.` : message)
+        return
+      }
+
+      clearLocalDraft(localDraftKey)
+      setAccountUpgradeAvailable(Boolean(payload.data?.accountUpgradeAvailable))
+      if (payload.data?.documentsRequired) {
+        setDraftReady(false)
+        setApplicationId(payload.data.applicationId ?? null)
+        setAccountReady(true)
+        setAgencyNotice(false)
+        setOtpActive(false)
+        setOtp('')
+        setDocumentsHandoffNotice(true)
+        setStep(3)
+        window.scrollTo({ top: 0, behavior: 'smooth' })
+        return
+      }
+
+      setSubmitted(true)
+      window.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (caught) {
-      setAccountErrors({ form: caught instanceof Error ? caught.message : 'No hemos podido acceder a tu cuenta.' })
-    } finally { setAccountSubmitting(false) }
+      setOtpError(caught instanceof Error ? caught.message : 'No hemos podido verificar el código. Inténtalo de nuevo.')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleSetPassword = async (event: FormEvent) => {
+    event.preventDefault()
+    setUpgradeError('')
+    if (upgradePassword.length < 10) {
+      setUpgradeError('La contraseña debe tener al menos 10 caracteres.')
+      return
+    }
+    if (!upgradeTermsAccepted) {
+      setUpgradeError('Debes aceptar los términos de la cuenta para continuar.')
+      return
+    }
+
+    setUpgradeSubmitting(true)
+    try {
+      const response = await fetch('/api/v1/tenant/account/set-password', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: upgradePassword, termsAccepted: true, termsVersion: 'terms-2026-08-v1' }),
+      })
+      const payload = await response.json().catch(() => ({})) as ApiErrorPayload
+      if (!response.ok && !(response.status === 409 && payload.error?.code === 'PASSWORD_ALREADY_SET')) {
+        throw new Error(apiError(payload, 'No hemos podido crear la cuenta. Inténtalo de nuevo.'))
+      }
+      setUpgradeComplete(true)
+      setUpgradePassword('')
+    } catch (caught) {
+      setUpgradeError(caught instanceof Error ? caught.message : 'No hemos podido crear la cuenta. Inténtalo de nuevo.')
+    } finally {
+      setUpgradeSubmitting(false)
+    }
   }
 
   if (propertyState === 'loading') return <main className="public-application public-application--success"><section className="public-application__success" aria-live="polite"><div className="public-application__loading" aria-hidden="true" /><h1>Cargando la vivienda</h1><p>Estamos comprobando el enlace seguro.</p></section></main>
@@ -623,7 +822,35 @@ export function PublicApplicationPage() {
             <Clock aria-hidden="true" />
             <p><strong>¿Qué ocurre ahora?</strong><br />La agencia revisará tu información y te contactará por {data.contactChannel.toLowerCase()}.</p>
           </div>
-          <p className="public-application__success-help">Puedes consultar esta candidatura desde tu cuenta. Tus documentos solo son accesibles para ti y para el equipo responsable de esta vivienda.</p>
+          {accountUpgradeAvailable && (
+            <div className="public-application__upgrade" aria-labelledby="account-upgrade-title">
+              {upgradeComplete ? (
+                <div className="public-application__upgrade-complete" role="status">
+                  <CheckCircle aria-hidden="true" />
+                  <div><h2 id="account-upgrade-title" ref={upgradeHeadingRef} tabIndex={-1}>Cuenta creada.</h2><p>Ya puedes usar tu correo y contraseña para consultar esta solicitud y completar futuros anuncios más rápido.</p></div>
+                </div>
+              ) : (
+                <>
+                  <h2 id="account-upgrade-title">Guarda tus datos para futuros anuncios</h2>
+                  <p>Crea una contraseña para volver a consultar tus solicitudes sin repetir tus datos.</p>
+                  {upgradeError && <div className="public-application__error-summary" role="alert"><strong>No hemos podido crear la cuenta</strong><p id="upgrade-error">{upgradeError}</p></div>}
+                  <form className="public-application__upgrade-form" onSubmit={handleSetPassword} noValidate aria-busy={upgradeSubmitting}>
+                    <label className="public-application__field">
+                      <span>Contraseña <RequiredMark /></span>
+                      <input required minLength={10} type="password" autoComplete="new-password" value={upgradePassword} onChange={(event) => { setUpgradePassword(event.target.value); setUpgradeError('') }} aria-invalid={Boolean(upgradeError && upgradePassword.length < 10)} aria-describedby={upgradeError ? 'upgrade-password-help upgrade-error' : 'upgrade-password-help'} />
+                      <small id="upgrade-password-help">Mínimo 10 caracteres.</small>
+                    </label>
+                    <label className="public-application__check public-application__upgrade-terms">
+                      <input required type="checkbox" checked={upgradeTermsAccepted} onChange={(event) => { setUpgradeTermsAccepted(event.target.checked); setUpgradeError('') }} aria-invalid={Boolean(upgradeError && !upgradeTermsAccepted)} aria-describedby={upgradeError ? 'upgrade-error' : undefined} />
+                      <span>Acepto los <a href="/legal/terminos" target="_blank" rel="noreferrer">términos de servicio<span className="public-application__sr-only">, se abre en una nueva pestaña</span></a> y he leído la <a href="/legal/privacidad" target="_blank" rel="noreferrer">política de privacidad<span className="public-application__sr-only">, se abre en una nueva pestaña</span></a>. <RequiredMark /></span>
+                    </label>
+                    <button className="public-application__button public-application__button--primary" type="submit" disabled={upgradeSubmitting}>{upgradeSubmitting ? 'Creando cuenta...' : 'Crear cuenta'}</button>
+                  </form>
+                </>
+              )}
+            </div>
+          )}
+          <p className="public-application__success-help">{accountUpgradeAvailable ? 'Tu candidatura queda registrada de forma segura. Crea una contraseña si quieres consultarla más adelante desde tu cuenta.' : 'Puedes consultar esta candidatura desde tu cuenta.'} Tus documentos solo son accesibles para ti y para el equipo responsable de esta vivienda.</p>
         </section>
       </main>
     )
@@ -670,59 +897,35 @@ export function PublicApplicationPage() {
           </div>
         </aside>
 
-        <section className="public-application__form-card" id="formulario-solicitud" aria-labelledby="step-heading">
-          {!accountReady ? (
-            <div className="public-application__account-gate">
-              <span className="public-application__account-icon" aria-hidden="true"><UserCircle weight="fill" /></span>
-              <p className="public-application__step-count">Cuenta de interesado</p>
-              <h2 id="step-heading">{verificationSent ? 'Verifica tu correo para continuar.' : accountMode === 'register' ? 'Crea tu cuenta para solicitar la vivienda.' : 'Inicia sesión para continuar.'}</h2>
-              <p>{verificationSent ? `Hemos enviado un enlace seguro a ${accountEmail}. Al abrirlo volverás a esta solicitud.` : 'Tu cuenta protege la documentación, guarda el progreso y reúne tus candidaturas en un solo lugar.'}</p>
+        <section className="public-application__form-card" id="formulario-solicitud" aria-labelledby={otpActive ? 'otp-heading' : 'step-heading'}>
+          {otpActive ? (
+            <div className="public-application__otp-panel">
+              <span className="public-application__otp-icon" aria-hidden="true"><LockKey weight="fill" /></span>
+              <p className="public-application__step-count">Verificación de correo</p>
+              <h2 id="otp-heading" ref={otpHeadingRef} tabIndex={-1}>Introduce el código de 6 dígitos</h2>
+              <p>Hemos enviado un código a <strong>{data.email}</strong>. Caduca en 10 minutos.</p>
 
-              {!verificationSent && <><div className="public-application__account-switch" aria-label="Tipo de acceso">
-                <button className={accountMode === 'register' ? 'is-active' : ''} type="button" onClick={() => { setAccountMode('register'); setAccountErrors({}) }}>Crear cuenta</button>
-                <button className={accountMode === 'login' ? 'is-active' : ''} type="button" onClick={() => { setAccountMode('login'); setAccountErrors({}) }}>Ya tengo cuenta</button>
-              </div>
-
-              {Object.keys(accountErrors).length > 0 && (
+              {otpError && (
                 <div className="public-application__error-summary" role="alert">
-                  <strong>Revisa los datos de acceso</strong>
-                  <p>Hay campos pendientes antes de continuar.</p>
+                  <strong>No hemos podido verificar el código</strong>
+                  <p id="otp-error">{otpError}{otpAttemptsRemaining !== null ? ` Te quedan ${otpAttemptsRemaining} ${otpAttemptsRemaining === 1 ? 'intento' : 'intentos'}.` : ''}</p>
                 </div>
               )}
 
-              <form className="public-application__account-form" onSubmit={handleAccountSubmit} noValidate>
-                {accountErrors.form && <div className="public-application__error-summary" role="alert"><strong>No hemos podido continuar</strong><p>{accountErrors.form}</p></div>}
-                {accountMode === 'register' && (
-                  <label className="public-application__field">
-                    <span>Nombre y apellidos <RequiredMark /></span>
-                    <input autoComplete="name" value={accountName} onChange={(event) => setAccountName(event.target.value)} aria-invalid={Boolean(accountErrors.name)} aria-describedby="account-name-error" />
-                    <FieldError id="account-name-error">{accountErrors.name}</FieldError>
-                  </label>
-                )}
+              <form className="public-application__otp-form" onSubmit={handleOtpSubmit} noValidate aria-busy={isSubmitting}>
                 <label className="public-application__field">
-                  <span>Correo electrónico <RequiredMark /></span>
-                  <input type="email" autoComplete="email" inputMode="email" value={accountEmail} onChange={(event) => setAccountEmail(event.target.value)} aria-invalid={Boolean(accountErrors.email)} aria-describedby="account-email-error" />
-                  <FieldError id="account-email-error">{accountErrors.email}</FieldError>
+                  <span>Código de verificación <RequiredMark /></span>
+                  <input className="public-application__otp-input" required type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={otp} onChange={(event) => { setOtp(event.target.value.replace(/\D/g, '').slice(0, 6)); setOtpError(''); setOtpAttemptsRemaining(null) }} aria-invalid={Boolean(otpError)} aria-describedby={otpError ? 'otp-help otp-error' : 'otp-help'} />
+                  <small id="otp-help">Escribe los 6 números del correo.</small>
                 </label>
-                <label className="public-application__field">
-                  <span>Contraseña <RequiredMark /></span>
-                  <input type="password" autoComplete={accountMode === 'register' ? 'new-password' : 'current-password'} value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} aria-invalid={Boolean(accountErrors.password)} aria-describedby="account-password-help account-password-error" />
-                  <small id="account-password-help">Mínimo 10 caracteres.</small>
-                  <FieldError id="account-password-error">{accountErrors.password}</FieldError>
-                </label>
-                {accountMode === 'register' && <p className="public-application__account-terms">Al crear la cuenta aceptas los <a href="/legal/terminos" target="_blank" rel="noreferrer">términos de servicio</a> y la <a href="/legal/privacidad" target="_blank" rel="noreferrer">política de privacidad</a>.</p>}
-                <button className="public-application__button public-application__button--primary" type="submit">
-                  {accountSubmitting ? 'Conectando...' : accountMode === 'register' ? 'Crear cuenta y continuar' : 'Iniciar sesión'} {!accountSubmitting && <ArrowRight aria-hidden="true" />}
-                </button>
+                <button className="public-application__button public-application__button--primary" type="submit" disabled={isSubmitting}>{isSubmitting ? 'Verificando...' : 'Verificar y enviar'}</button>
               </form>
-              </>}
 
-              {verificationSent && <div className="public-application__account-security"><ShieldCheck aria-hidden="true" /><p><strong>Revisa también la carpeta de correo no deseado.</strong><br />Puedes cerrar esta pestaña. El enlace del correo recuperará esta vivienda.</p></div>}
-
-              <div className="public-application__account-security">
-                <LockKey aria-hidden="true" />
-                <p><strong>Acceso protegido</strong><br />La agencia no verá tu contraseña. Solo recibirá los datos que envíes con la solicitud.</p>
+              <div className="public-application__otp-options">
+                <button type="button" onClick={() => { setOtpActive(false); setOtp(''); setOtpError(''); setStep(0) }}>Corregir el correo</button>
+                <button type="button" onClick={() => void requestOtp()} disabled={otpCooldown > 0 || otpSending}>{otpSending ? 'Enviando...' : otpCooldown > 0 ? `Reenviar código en ${otpCooldown} s` : 'Reenviar código'}</button>
               </div>
+              <div className="public-application__otp-security"><ShieldCheck aria-hidden="true" /><p><strong>Tu solicitud sigue sin enviarse.</strong><br />Solo la enviaremos cuando verifiques que este correo es tuyo.</p></div>
             </div>
           ) : (
           <>
@@ -731,7 +934,7 @@ export function PublicApplicationPage() {
               <p className="public-application__step-count">Paso {step + 1} de {steps.length}</p>
               <h2 id="step-heading" ref={headingRef} tabIndex={-1}>{steps[step].label}</h2>
             </div>
-            <span className={`public-application__saved ${saveState === 'error' ? 'is-error' : ''}`}><Check aria-hidden="true" /> {saveState === 'saving' ? 'Guardando...' : saveState === 'error' ? 'Sin guardar' : 'Progreso guardado'}</span>
+            <span className={`public-application__saved ${saveState === 'error' ? 'is-error' : ''}`}><Check aria-hidden="true" /> {!authChecked ? 'Preparando guardado...' : saveState === 'saving' ? 'Guardando...' : saveState === 'error' ? 'Sin guardar' : 'Progreso guardado'}</span>
           </div>
 
           <nav className="public-application__progress" aria-label="Progreso de la solicitud">
@@ -747,6 +950,21 @@ export function PublicApplicationPage() {
             </ol>
           </nav>
 
+          {agencyNotice && (
+            <div className="public-application__notice" role="status">
+              <ShieldCheck aria-hidden="true" />
+              <span><strong>Has iniciado sesión como agencia.</strong><br />Esta solicitud se tramitará como invitado y no se vinculará a tu cuenta de agencia.</span>
+              <button type="button" onClick={() => setAgencyNotice(false)} aria-label="Cerrar aviso de sesión de agencia">Cerrar</button>
+            </div>
+          )}
+
+          {documentsHandoffNotice && (
+            <div className="public-application__notice public-application__notice--important" role="status">
+              <CheckCircle aria-hidden="true" />
+              <span><strong>Tu correo está verificado.</strong><br />Añade la documentación solicitada para terminar.</span>
+            </div>
+          )}
+
           {restored && (
             <div className="public-application__restored" role="status">
               <CheckCircle aria-hidden="true" /> Hemos recuperado el progreso guardado en este dispositivo.
@@ -761,7 +979,11 @@ export function PublicApplicationPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>
+          <form onSubmit={handleSubmit} noValidate aria-busy={isSubmitting || otpSending}>
+            <label className="public-application__honeypot" aria-hidden="true">
+              Website
+              <input name="website" type="text" autoComplete="off" tabIndex={-1} value={website} onChange={(event) => setWebsite(event.target.value)} />
+            </label>
             {step === 0 && (
               <div className="public-application__step-fields">
                 <p className="public-application__intro">La agencia utilizará estos datos para informarte sobre esta vivienda.</p>
@@ -931,7 +1153,8 @@ export function PublicApplicationPage() {
                 </div>
                 <p className="public-application__format-note">Formatos permitidos: PDF, JPG y PNG. Tamaño máximo: 10 MB por archivo. Inquilink vuelve a validar cada archivo de forma segura al enviarlo.</p>
                 {property.requestedDocumentCategories.length === 0 && <div className="public-application__privacy-note"><CheckCircle aria-hidden="true" /><p><strong>No se solicita documentación</strong><br />Puedes continuar al último paso.</p></div>}
-                {([{ id: 'primary', fullName: data.fullName || 'Solicitante principal' }, ...data.additionalAdults] as Array<{ id: string; fullName: string }>).map((adult, adultIndex) => (
+                {!accountReady && property.requestedDocumentCategories.length > 0 && <div className="public-application__notice public-application__notice--important" role="status"><LockKey aria-hidden="true" /><span><strong>Añadirás los documentos después de verificar tu correo.</strong><br />Continúa hasta el final. Te enviaremos un código antes de guardar o enviar ningún dato.</span></div>}
+                {accountReady && ([{ id: 'primary', fullName: data.fullName || 'Solicitante principal' }, ...data.additionalAdults] as Array<{ id: string; fullName: string }>).map((adult, adultIndex) => (
                   <section className="public-application__adult-documents" key={adult.id} aria-labelledby={`documents-${adult.id}`}>
                     <h3 id={`documents-${adult.id}`}>{adultIndex === 0 ? 'Tu documentación' : `Documentación de ${adult.fullName}`}</h3>
                     {property.requestedDocumentCategories.map((category) => {
@@ -997,8 +1220,8 @@ export function PublicApplicationPage() {
                   Continuar <ArrowRight aria-hidden="true" />
                 </button>
               ) : (
-                <button className="public-application__button public-application__button--primary" type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? 'Enviando solicitud...' : 'Enviar solicitud'} {!isSubmitting && <ArrowRight aria-hidden="true" />}
+                <button className="public-application__button public-application__button--primary" type="submit" disabled={isSubmitting || otpSending}>
+                  {otpSending ? 'Enviando código...' : isSubmitting ? 'Enviando solicitud...' : 'Enviar solicitud'} {!isSubmitting && !otpSending && <ArrowRight aria-hidden="true" />}
                 </button>
               )}
             </div>

@@ -2,7 +2,7 @@ import argon2 from "argon2";
 import { and, eq, gt, inArray, isNull, or } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { clearSessionCookie, createSession, requireUser, SESSION_COOKIE, setSessionCookie } from "../../auth/session.js";
+import { clearSessionCookie, createSession, requireTenant, requireUser, SESSION_COOKIE, setSessionCookie } from "../../auth/session.js";
 import { agencies, agencyClosureCleanup, agencyInvitations, agencyMemberships, emailOutbox, oneTimeTokens, sessions, subscriptions, users } from "../../db/schema.js";
 import { ApiError } from "../../lib/errors.js";
 import { hashSecret, newId, newSecret } from "../../lib/ids.js";
@@ -350,5 +350,29 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AppDependencies):
   app.get("/api/v1/auth/me", { schema: { tags: ["Autenticación"], summary: "Obtener la sesión actual" } }, async (request) => {
     const user = requireUser(request);
     return { data: { user, agency: request.currentAgency } };
+  });
+
+  app.post("/api/v1/tenant/account/set-password", { schema: { tags: ["Inquilinos"], summary: "Guardar una contraseña para una cuenta invitada" } }, async (request) => {
+    const tenant = requireTenant(request);
+    const input = z.object({
+      password,
+      termsAccepted: z.literal(true, { error: "Debes aceptar los términos de la cuenta para continuar." }),
+      termsVersion: z.literal(CURRENT_ACCOUNT_TERMS_VERSION, { error: "La versión de los términos no es válida. Actualiza la página e inténtalo de nuevo." }),
+    }).strict().parse(request.body);
+    const changedAt = now();
+    const passwordHash = await argon2.hash(input.password);
+    await deps.db.transaction(async (tx) => {
+      const rows = await tx.select({ passwordHash: users.passwordHash, accountState: users.accountState }).from(users)
+        .where(and(eq(users.id, tenant.id), eq(users.kind, "tenant"))).for("update").limit(1);
+      if (rows[0]?.accountState !== "active") throw new ApiError(409, "ACCOUNT_CLOSED", "Esta cuenta está cerrada o pendiente de eliminación.");
+      if (rows[0].passwordHash !== null) throw new ApiError(409, "PASSWORD_ALREADY_SET", "Esta cuenta ya tiene una contraseña configurada.");
+      await tx.update(users).set({
+        passwordHash,
+        termsVersion: input.termsVersion,
+        termsAcceptedAt: changedAt,
+        updatedAt: changedAt,
+      }).where(and(eq(users.id, tenant.id), isNull(users.passwordHash)));
+    });
+    return { data: { passwordSet: true } };
   });
 }

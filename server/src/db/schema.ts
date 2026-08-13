@@ -37,7 +37,7 @@ export const users = pgTable("users", {
   kind: userKind("kind").notNull(),
   email: varchar("email", { length: 320 }).notNull(),
   fullName: varchar("full_name", { length: 200 }).notNull(),
-  passwordHash: text("password_hash").notNull(),
+  passwordHash: text("password_hash"),
   emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
   termsVersion: varchar("terms_version", { length: 80 }),
   termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
@@ -202,6 +202,24 @@ export const properties = pgTable("properties", {
   foreignKey({ name: "properties_responsible_membership_fk", columns: [table.agencyId, table.responsibleUserId], foreignColumns: [agencyMemberships.agencyId, agencyMemberships.userId] }).onDelete("restrict"),
 ]);
 
+/** Passwordless, property-scoped verification challenges for guest applications. */
+export const guestApplicationOtps = pgTable("guest_application_otps", {
+  id: text("id").primaryKey(),
+  emailNormalized: varchar("email_normalized", { length: 320 }).notNull(),
+  propertyId: text("property_id").notNull().references(() => properties.id, { onDelete: "cascade" }),
+  codeHash: varchar("code_hash", { length: 64 }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  index("guest_application_otps_lookup_idx").on(table.propertyId, table.emailNormalized, table.createdAt),
+  index("guest_application_otps_expiry_idx").on(table.expiresAt, table.id),
+  check("guest_application_otps_attempts_check", sql`${table.attempts} >= 0 and ${table.attempts} <= 5`),
+  check("guest_application_otps_expiry_check", sql`${table.expiresAt} > ${table.createdAt}`),
+  check("guest_application_otps_hash_check", sql`length(${table.codeHash}) = 64`),
+]);
+
 export const applications = pgTable("applications", {
   id: text("id").primaryKey(),
   agencyId: text("agency_id").notNull().references(() => agencies.id, { onDelete: "cascade" }),
@@ -214,6 +232,7 @@ export const applications = pgTable("applications", {
   phone: varchar("phone", { length: 16 }),
   normalizedPhone: varchar("normalized_phone", { length: 15 }),
   normalizedEmail: varchar("normalized_email", { length: 320 }),
+  duplicatePhoneFlaggedAt: timestamp("duplicate_phone_flagged_at", { withTimezone: true }),
   individualNetMonthlyIncomeCents: integer("individual_net_monthly_income_cents"),
   householdNetMonthlyIncomeCents: integer("household_net_monthly_income_cents"),
   adultOccupants: integer("adult_occupants"),
@@ -494,7 +513,7 @@ export const emailOutbox = pgTable("email_outbox", {
   index("email_outbox_user_idx").on(table.userId),
   index("email_outbox_agency_idx").on(table.agencyId),
   index("email_outbox_subject_idx").on(table.subjectType, table.subjectId),
-  check("email_outbox_template_check", sql`${table.template} in ('new_applicant', 'viewing_reminder', 'trial_ending', 'payment_failure', 'team_invitation', 'verify_email', 'reset_password', 'application_received', 'viewing_created', 'viewing_rescheduled', 'viewing_cancelled')`),
+  check("email_outbox_template_check", sql`${table.template} in ('new_applicant', 'viewing_reminder', 'trial_ending', 'payment_failure', 'team_invitation', 'verify_email', 'reset_password', 'guest_application_otp', 'application_received', 'viewing_created', 'viewing_rescheduled', 'viewing_cancelled')`),
   check("email_outbox_state_check", sql`${table.state} in ('pending', 'processing', 'sent', 'failed', 'expired')`),
   check("email_outbox_attempts_check", sql`${table.attempts} >= 0`),
   check("email_outbox_delivery_window_check", sql`${table.expiresAt} > ${table.createdAt}`),

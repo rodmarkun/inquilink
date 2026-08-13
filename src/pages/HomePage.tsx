@@ -21,9 +21,9 @@ import {
 
 const faqItems = [
   {
-    question: '¿Puedo cancelar durante la prueba?',
+    question: '¿Puedo cancelar cuando quiera?',
     answer:
-      'Sí. Puedes cancelar en cualquier momento desde Facturación. Verás la fecha exacta del primer cargo antes de confirmar el plan.',
+      'Sí. Puedes cancelar en cualquier momento desde Facturación. Verás la fecha exacta de cada cargo antes de confirmar el plan.',
   },
   {
     question: '¿Cómo funciona el enlace de cada inmueble?',
@@ -396,7 +396,7 @@ export function HomePage() {
         <section className="pricing-section section-space" id="precios" aria-labelledby="pricing-title">
           <div className="page-shell">
             <div className="section-heading pricing-heading">
-              <h2 id="pricing-title">Prueba el flujo completo durante 30 días.</h2>
+              <h2 id="pricing-title">Elige el plan que encaja con tu cartera.</h2>
             </div>
             <div className="pricing-grid">
               {pricingPlans.map((plan) => <PricingCard plan={plan} key={plan.id} />)}

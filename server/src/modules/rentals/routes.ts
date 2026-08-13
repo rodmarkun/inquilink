@@ -1,7 +1,9 @@
-import { and, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { randomInt, timingSafeEqual } from "node:crypto";
+import { and, asc, count, desc, eq, gt, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { requireAgency, requireTenant, requireUser } from "../../auth/session.js";
+import { enforceGuestApplicationRateLimit, enforceGuestOtpRateLimits } from "../../auth/rate-limit.js";
+import { createSession, requireAgency, requireTenant, requireUser, setSessionCookie } from "../../auth/session.js";
 import {
   agencies,
   agencyMemberships,
@@ -12,6 +14,7 @@ import {
   appointments,
   auditEvents,
   documentStorageCleanup,
+  guestApplicationOtps,
   properties,
   users,
 } from "../../db/schema.js";
@@ -144,6 +147,17 @@ const applicationForm = applicationFormFields.superRefine((value, context) => {
     context.addIssue({ code: "custom", message: "Cada persona adulta debe tener un identificador distinto.", path: ["additionalAdults"] });
   }
 });
+const submitApplicationInput = z.object({
+  application: applicationForm,
+  consentVersion: z.literal(CURRENT_CONSENT_VERSION),
+  privacyConsent: z.literal(true),
+  submissionKey: z.string().trim().min(16).max(200),
+});
+const guestSubmitApplicationInput = submitApplicationInput.extend({
+  email: z.email().max(320),
+  otp: z.string().regex(/^\d{6}$/),
+  website: z.string().optional(),
+}).strict();
 
 const applicationDraft = applicationFormFields.partial().extend({
   additionalAdults: z.array(additionalAdultDraft).max(19).optional(),
@@ -328,8 +342,12 @@ function publicProperty(record: Awaited<ReturnType<typeof propertyForToken>>) {
 }
 
 function safeApplication<T extends typeof applications.$inferSelect>(application: T) {
-  const { sourceLinkTokenHash: _sourceLinkTokenHash, submissionKeyHash: _submissionKeyHash, normalizedEmail: _normalizedEmail, normalizedPhone: _normalizedPhone, ...safe } = application;
+  const { sourceLinkTokenHash: _sourceLinkTokenHash, submissionKeyHash: _submissionKeyHash, normalizedEmail: _normalizedEmail, normalizedPhone: _normalizedPhone, duplicatePhoneFlaggedAt: _duplicatePhoneFlaggedAt, ...safe } = application;
   return safe;
+}
+
+function agencySafeApplication<T extends typeof applications.$inferSelect>(application: T) {
+  return { ...safeApplication(application), duplicatePhoneFlaggedAt: application.duplicatePhoneFlaggedAt };
 }
 
 function assertApplicationActive(application: typeof applications.$inferSelect): void {
@@ -486,6 +504,130 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
         dedupeKey: `application:${input.applicationId}:agency-admin:${administrator.userId}`,
       }, { transaction });
     }
+  }
+
+  async function submitApplicationInTransaction(
+    tx: Database,
+    tenant: { id: string; email: string },
+    record: Awaited<ReturnType<typeof propertyForToken>>,
+    input: z.infer<typeof submitApplicationInput>,
+    changedAt: Date,
+    options: { persistGuestDraftWhenDocumentsMissing?: boolean; flagDuplicatePhone?: boolean } = {},
+  ) {
+    const adultProfiles = adultProfilesFromApplication(input.application);
+    const normalizedPhone = normalizeCandidatePhone(input.application.phone);
+    const normalizedEmail = normalizeCandidateEmail(input.application.email);
+    const submissionKeyHash = hashSecret(`${tenant.id}:${record.property.id}:${input.submissionKey}`);
+    const agencyLock = await tx.select({ accountState: agencies.accountState, name: agencies.name }).from(agencies)
+      .where(eq(agencies.id, record.property.agencyId)).for("update").limit(1);
+    const tenantLock = await tx.select({ accountState: users.accountState }).from(users).where(eq(users.id, tenant.id)).for("update").limit(1);
+    if (agencyLock[0]?.accountState !== "active" || tenantLock[0]?.accountState !== "active") {
+      throw new ApiError(409, "ACCOUNT_CLOSED", "La cuenta está cerrada o pendiente de eliminación.");
+    }
+    const property = await lockPublishedPropertyForToken(tx, record.property.id, record.property.agencyId, record.tokenHash);
+    const applicationRows = await tx.select().from(applications).where(and(
+      eq(applications.propertyId, property.id), eq(applications.tenantUserId, tenant.id),
+    )).for("update").limit(1);
+    const application = applicationRows[0];
+    if (application) assertApplicationActive(application);
+    if (application?.submittedAt && application.submissionKeyHash !== submissionKeyHash) {
+      throw new ApiError(409, "APPLICATION_ALREADY_SUBMITTED", "Ya existe una solicitud enviada para este inmueble.", { applicationId: application.id });
+    }
+
+    let duplicatePhoneFlaggedAt: Date | null = application?.duplicatePhoneFlaggedAt ?? null;
+    if (!application?.submittedAt && options.flagDuplicatePhone && !duplicatePhoneFlaggedAt) {
+      const duplicateRows = await tx.select({ id: applications.id }).from(applications).where(and(
+        eq(applications.propertyId, property.id),
+        eq(applications.normalizedPhone, normalizedPhone),
+        ne(applications.tenantUserId, tenant.id),
+        isNotNull(applications.submittedAt),
+      )).limit(1);
+      if (duplicateRows[0]) duplicatePhoneFlaggedAt = changedAt;
+    }
+
+    if (!application?.submittedAt && property.requestedDocumentCategories.length > 0) {
+      if (!application && !options.persistGuestDraftWhenDocumentsMissing) {
+        throw new ApiError(409, "APPLICATION_DRAFT_REQUIRED", "Guarda el borrador antes de añadir la documentación solicitada.");
+      }
+      const uploaded = application
+        ? await tx.select({ category: applicationDocuments.category, adultProfileId: applicationDocuments.adultProfileId }).from(applicationDocuments)
+          .where(and(eq(applicationDocuments.applicationId, application.id), eq(applicationDocuments.tenantUserId, tenant.id), eq(applicationDocuments.malwareScanState, "clean"), eq(applicationDocuments.deletionState, "active")))
+        : [];
+      const missing = missingDocumentsByAdult(property.requestedDocumentCategories, adultProfiles, uploaded);
+      if (missing.length) {
+        if (options.persistGuestDraftWhenDocumentsMissing) {
+          let persisted: typeof applications.$inferSelect;
+          if (application) {
+            const updated = await tx.update(applications).set({
+              draftData: input.application,
+              adultProfiles,
+              documentState: "missing",
+              sourceLinkTokenHash: record.tokenHash,
+              duplicatePhoneFlaggedAt,
+              updatedAt: changedAt,
+            }).where(and(eq(applications.id, application.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active"), isNull(applications.submittedAt))).returning();
+            if (!updated[0]) throw new ApiError(409, "APPLICATION_ALREADY_SUBMITTED", "La solicitud se ha enviado con otra operación.", { applicationId: application.id });
+            persisted = updated[0];
+          } else {
+            const inserted = await tx.insert(applications).values({
+              id: newId(), agencyId: property.agencyId, propertyId: property.id, tenantUserId: tenant.id,
+              responsibleUserId: null, status: "new", documentState: "missing", draftData: input.application,
+              adultProfiles, sourceLinkTokenHash: record.tokenHash, duplicatePhoneFlaggedAt, createdAt: changedAt, updatedAt: changedAt,
+            }).returning();
+            persisted = inserted[0]!;
+          }
+          return { missing, application: persisted, idempotentReplay: false, documentsRequired: true };
+        }
+        await tx.update(applications).set({ documentState: "missing", updatedAt: changedAt })
+          .where(and(eq(applications.id, application!.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active")));
+        return { missing, application: null, idempotentReplay: false, documentsRequired: false };
+      }
+    }
+
+    const notificationAdministrators = await tx.select({ userId: users.id, email: users.email }).from(agencyMemberships)
+      .innerJoin(users, eq(users.id, agencyMemberships.userId))
+      .where(and(eq(agencyMemberships.agencyId, record.property.agencyId), eq(agencyMemberships.role, "admin"), eq(users.accountState, "active")));
+    let persisted: typeof applications.$inferSelect;
+    const idempotentReplay = Boolean(application?.submittedAt);
+    if (application?.submittedAt) {
+      persisted = application;
+    } else if (application) {
+      const updated = await tx.update(applications).set({
+        draftData: input.application, consentVersion: input.consentVersion, consentedAt: changedAt,
+        phone: input.application.phone, normalizedPhone, normalizedEmail, adultProfiles,
+        individualNetMonthlyIncomeCents: input.application.individualNetMonthlyIncomeCents,
+        householdNetMonthlyIncomeCents: input.application.householdNetMonthlyIncomeCents, adultOccupants: input.application.adultOccupants,
+        minorOccupants: input.application.minorOccupants, intendedMoveInDate: input.application.intendedMoveInDate,
+        applicationDataPromotedAt: changedAt,
+        submittedAt: changedAt, documentState: property.requestedDocumentCategories.length ? "complete" : "not_requested",
+        responsibleUserId: null, sourceLinkTokenHash: record.tokenHash, submissionKeyHash, duplicatePhoneFlaggedAt, updatedAt: changedAt,
+      }).where(and(eq(applications.id, application.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active"), isNull(applications.submittedAt))).returning();
+      if (!updated[0]) throw new ApiError(409, "APPLICATION_ALREADY_SUBMITTED", "La solicitud se ha enviado con otra operación.", { applicationId: application.id });
+      persisted = updated[0];
+    } else {
+      const inserted = await tx.insert(applications).values({
+        id: newId(), agencyId: property.agencyId, propertyId: property.id, tenantUserId: tenant.id,
+        responsibleUserId: null, status: "new", documentState: "not_requested",
+        submittedAt: changedAt, draftData: input.application, consentVersion: input.consentVersion, consentedAt: changedAt,
+        phone: input.application.phone, normalizedPhone, normalizedEmail, adultProfiles,
+        individualNetMonthlyIncomeCents: input.application.individualNetMonthlyIncomeCents,
+        householdNetMonthlyIncomeCents: input.application.householdNetMonthlyIncomeCents, adultOccupants: input.application.adultOccupants,
+        minorOccupants: input.application.minorOccupants, intendedMoveInDate: input.application.intendedMoveInDate,
+        applicationDataPromotedAt: changedAt,
+        sourceLinkTokenHash: record.tokenHash, submissionKeyHash, duplicatePhoneFlaggedAt, createdAt: changedAt, updatedAt: changedAt,
+      }).returning();
+      persisted = inserted[0]!;
+    }
+    await enqueueApplicationNotifications(tx, {
+      applicationId: persisted.id,
+      tenantUserId: tenant.id,
+      agencyId: record.property.agencyId,
+      tenantEmail: tenant.email,
+      propertyTitle: property.title,
+      agencyName: agencyLock[0]!.name,
+      administrators: notificationAdministrators,
+    });
+    return { missing: null, application: persisted, idempotentReplay, documentsRequired: false };
   }
 
   app.post("/api/v1/agency/properties", { schema: { tags: ["Agencia"], summary: "Crear un anuncio" } }, async (request, reply) => {
@@ -708,6 +850,141 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     return { data: { property: publicProperty(await propertyForToken(deps, token)) } };
   });
 
+  app.post("/api/v1/public/applications/by-link/:token/request-otp", { schema: { tags: ["Inquilinos"], summary: "Solicitar un código para una solicitud invitada" } }, async (request) => {
+    const token = z.string().min(20).max(200).parse((request.params as { token?: unknown }).token);
+    const record = await propertyForToken(deps, token);
+    const input = z.object({
+      email: z.email().max(320),
+      website: z.string().optional(),
+      formElapsedMs: z.number().int().min(0).optional(),
+    }).strict().parse(request.body);
+    const generic = { message: "Si el correo es válido, recibirás un código para enviar la solicitud." };
+    if ((input.website?.length ?? 0) > 0 || (input.formElapsedMs !== undefined && input.formElapsedMs < 2_000)) {
+      return { data: generic };
+    }
+    const email = normalizeCandidateEmail(input.email);
+    await enforceGuestOtpRateLimits(deps, request, email);
+    const createdAt = nowFor(deps);
+    const expiresAt = new Date(createdAt.getTime() + 10 * 60_000);
+    const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    const otpId = newId();
+    await deps.db.transaction(async (tx) => {
+      await tx.update(guestApplicationOtps).set({ usedAt: createdAt }).where(and(
+        eq(guestApplicationOtps.propertyId, record.property.id),
+        eq(guestApplicationOtps.emailNormalized, email),
+        isNull(guestApplicationOtps.usedAt),
+      ));
+      await tx.insert(guestApplicationOtps).values({
+        id: otpId,
+        emailNormalized: email,
+        propertyId: record.property.id,
+        codeHash: hashSecret(code),
+        attempts: 0,
+        expiresAt,
+        createdAt,
+      });
+      await deps.emailProvider.send({
+        recipient: email,
+        template: "guest_application_otp",
+        variables: { code, propertyTitle: record.property.title },
+        dedupeKey: `guest-application-otp:${otpId}`,
+        expiresAt,
+      }, { transaction: tx });
+    });
+    return { data: { ...generic, ...(deps.config.NODE_ENV === "test" ? { debugOtp: code } : {}) } };
+  });
+
+  app.post("/api/v1/public/applications/by-link/:token/submit", { schema: { tags: ["Inquilinos"], summary: "Enviar una solicitud invitada" } }, async (request, reply) => {
+    const token = z.string().min(20).max(200).parse((request.params as { token?: unknown }).token);
+    const record = await propertyForToken(deps, token);
+    const input = guestSubmitApplicationInput.parse(request.body);
+    if ((input.website?.length ?? 0) > 0) throw new ApiError(400, "INVALID_SUBMISSION", "No se ha podido validar la solicitud.");
+    const email = normalizeCandidateEmail(input.email);
+    if (normalizeCandidateEmail(input.application.email) !== email) {
+      throw new ApiError(422, "VERIFIED_EMAIL_MISMATCH", "El correo de la solicitud debe coincidir con el correo verificado.");
+    }
+    const otpRows = await deps.db.select().from(guestApplicationOtps).where(and(
+      eq(guestApplicationOtps.propertyId, record.property.id),
+      eq(guestApplicationOtps.emailNormalized, email),
+      isNull(guestApplicationOtps.usedAt),
+    )).orderBy(desc(guestApplicationOtps.createdAt), desc(guestApplicationOtps.id)).limit(1);
+    const otp = otpRows[0];
+    const changedAt = nowFor(deps);
+    if (!otp || otp.expiresAt <= changedAt || otp.attempts >= 5) {
+      throw new ApiError(400, "OTP_INVALID", "El código no es válido o ha caducado.");
+    }
+    if (changedAt.getTime() < otp.createdAt.getTime() + 2_000) {
+      throw new ApiError(400, "INVALID_SUBMISSION", "No se ha podido validar la solicitud.");
+    }
+    const suppliedHash = hashSecret(input.otp);
+    const matches = timingSafeEqual(Buffer.from(otp.codeHash, "hex"), Buffer.from(suppliedHash, "hex"));
+    if (!matches) {
+      const attemptsRemaining = await deps.db.transaction(async (tx) => {
+        const activeRows = await tx.select().from(guestApplicationOtps).where(and(
+          eq(guestApplicationOtps.id, otp.id), isNull(guestApplicationOtps.usedAt),
+        )).for("update").limit(1);
+        const active = activeRows[0];
+        if (!active || active.expiresAt <= changedAt || active.attempts >= 5) return null;
+        const attempts = active.attempts + 1;
+        await tx.update(guestApplicationOtps).set({ attempts, ...(attempts >= 5 ? { usedAt: changedAt } : {}) })
+          .where(and(eq(guestApplicationOtps.id, active.id), isNull(guestApplicationOtps.usedAt)));
+        return Math.max(0, 5 - attempts);
+      });
+      if (attemptsRemaining === null) throw new ApiError(400, "OTP_INVALID", "El código no es válido o ha caducado.");
+      throw new ApiError(400, "OTP_INVALID", "El código no es válido o ha caducado.", { attemptsRemaining });
+    }
+
+    await enforceGuestApplicationRateLimit(deps, request);
+    const normalizedPhone = normalizeCandidatePhone(input.application.phone);
+    const existingTenantRows = await deps.db.select({ id: users.id }).from(users).where(and(eq(users.email, email), eq(users.kind, "tenant"))).limit(1);
+    const duplicatePhoneRows = await deps.db.select({ id: applications.id }).from(applications).where(and(
+      eq(applications.propertyId, record.property.id),
+      eq(applications.normalizedPhone, normalizedPhone),
+      isNotNull(applications.submittedAt),
+      existingTenantRows[0] ? ne(applications.tenantUserId, existingTenantRows[0].id) : undefined,
+    )).limit(1);
+    if (duplicatePhoneRows[0]) await enforceGuestApplicationRateLimit(deps, request);
+
+    await options.beforeApplicationWrite?.("submit");
+    const completed = await deps.db.transaction(async (tx) => {
+      const consumed = await tx.update(guestApplicationOtps).set({ usedAt: changedAt }).where(and(
+        eq(guestApplicationOtps.id, otp.id),
+        isNull(guestApplicationOtps.usedAt),
+        gt(guestApplicationOtps.expiresAt, changedAt),
+        lt(guestApplicationOtps.attempts, 5),
+      )).returning({ id: guestApplicationOtps.id });
+      if (!consumed[0]) throw new ApiError(400, "OTP_INVALID", "El código no es válido o ha caducado.");
+
+      await tx.insert(users).values({
+        id: newId(), kind: "tenant", email, fullName: input.application.fullName, passwordHash: null,
+        emailVerifiedAt: changedAt, accountState: "active", createdAt: changedAt, updatedAt: changedAt,
+      }).onConflictDoNothing({ target: [users.email, users.kind] });
+      const tenantRows = await tx.select().from(users).where(and(eq(users.email, email), eq(users.kind, "tenant"))).for("update").limit(1);
+      const tenant = tenantRows[0];
+      if (!tenant || tenant.accountState !== "active") throw new ApiError(409, "ACCOUNT_CLOSED", "Esta cuenta está cerrada o pendiente de eliminación.");
+      if (!tenant.emailVerifiedAt) await tx.update(users).set({ emailVerifiedAt: changedAt, updatedAt: changedAt }).where(eq(users.id, tenant.id));
+      const result = await submitApplicationInTransaction(tx as unknown as Database, tenant, record, input, changedAt, {
+        persistGuestDraftWhenDocumentsMissing: true,
+        flagDuplicatePhone: true,
+      });
+      return { result, tenantId: tenant.id, accountUpgradeAvailable: tenant.passwordHash === null };
+    });
+    const session = await createSession(deps, completed.tenantId);
+    setSessionCookie(reply, deps, session.token, session.expiresAt);
+    const response = { data: {
+      application: safeApplication(completed.result.application!),
+      applicationId: completed.result.application!.id,
+      idempotentReplay: completed.result.idempotentReplay,
+      accountUpgradeAvailable: completed.accountUpgradeAvailable,
+      documentsRequired: completed.result.documentsRequired,
+      ...(completed.result.missing ? {
+        missingCategories: [...new Set(completed.result.missing.flatMap((item) => item.categories))],
+        missingByAdult: completed.result.missing,
+      } : {}),
+    } };
+    return completed.result.documentsRequired || completed.result.idempotentReplay ? response : reply.status(201).send(response);
+  });
+
   app.get("/api/v1/tenant/application-drafts/by-link/:token", { schema: { tags: ["Inquilinos"], summary: "Recuperar un borrador propio" } }, async (request) => {
     const tenant = requireTenant(request);
     const token = z.string().min(20).max(200).parse((request.params as { token?: unknown }).token);
@@ -771,92 +1048,13 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     const tenant = requireTenant(request);
     const token = z.string().min(20).max(200).parse((request.params as { token?: unknown }).token);
     const record = await propertyForToken(deps, token);
-    const input = z.object({
-      application: applicationForm,
-      consentVersion: z.literal(CURRENT_CONSENT_VERSION),
-      privacyConsent: z.literal(true),
-      submissionKey: z.string().trim().min(16).max(200),
-    }).parse(request.body);
+    const input = submitApplicationInput.parse(request.body);
     if (input.application.email.toLowerCase() !== tenant.email.toLowerCase()) {
       throw new ApiError(422, "VERIFIED_EMAIL_MISMATCH", "El correo de la solicitud debe coincidir con el correo verificado de tu cuenta.");
     }
-    const adultProfiles = adultProfilesFromApplication(input.application);
-    const submissionKeyHash = hashSecret(`${tenant.id}:${record.property.id}:${input.submissionKey}`);
     const changedAt = nowFor(deps);
     await options.beforeApplicationWrite?.("submit");
-    const result = await deps.db.transaction(async (tx) => {
-      const agencyLock = await tx.select({ accountState: agencies.accountState, name: agencies.name }).from(agencies).where(eq(agencies.id, record.property.agencyId)).for("update").limit(1);
-      const tenantLock = await tx.select({ accountState: users.accountState }).from(users).where(eq(users.id, tenant.id)).for("update").limit(1);
-      if (agencyLock[0]?.accountState !== "active" || tenantLock[0]?.accountState !== "active") {
-        throw new ApiError(409, "ACCOUNT_CLOSED", "La cuenta está cerrada o pendiente de eliminación.");
-      }
-      const property = await lockPublishedPropertyForToken(tx as unknown as Database, record.property.id, record.property.agencyId, record.tokenHash);
-      const applicationRows = await tx.select().from(applications).where(and(
-        eq(applications.propertyId, property.id), eq(applications.tenantUserId, tenant.id),
-      )).for("update").limit(1);
-      const application = applicationRows[0];
-      if (application) assertApplicationActive(application);
-      if (application?.submittedAt) {
-        if (application.submissionKeyHash !== submissionKeyHash) {
-          throw new ApiError(409, "APPLICATION_ALREADY_SUBMITTED", "Ya existe una solicitud enviada para este inmueble.", { applicationId: application.id });
-        }
-      } else if (property.requestedDocumentCategories.length > 0) {
-        if (!application) throw new ApiError(409, "APPLICATION_DRAFT_REQUIRED", "Guarda el borrador antes de añadir la documentación solicitada.");
-        const uploaded = await tx.select({ category: applicationDocuments.category, adultProfileId: applicationDocuments.adultProfileId }).from(applicationDocuments)
-          .where(and(eq(applicationDocuments.applicationId, application.id), eq(applicationDocuments.tenantUserId, tenant.id), eq(applicationDocuments.malwareScanState, "clean"), eq(applicationDocuments.deletionState, "active")));
-        const missing = missingDocumentsByAdult(property.requestedDocumentCategories, adultProfiles, uploaded);
-        if (missing.length) {
-          await tx.update(applications).set({ documentState: "missing", updatedAt: changedAt })
-            .where(and(eq(applications.id, application.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active")));
-          return { missing, application: null, idempotentReplay: false };
-        }
-      }
-      const notificationAdministrators = await tx.select({ userId: users.id, email: users.email }).from(agencyMemberships)
-        .innerJoin(users, eq(users.id, agencyMemberships.userId))
-        .where(and(eq(agencyMemberships.agencyId, record.property.agencyId), eq(agencyMemberships.role, "admin"), eq(users.accountState, "active")));
-      let persisted: typeof applications.$inferSelect;
-      let idempotentReplay = Boolean(application?.submittedAt);
-      if (application?.submittedAt) {
-        persisted = application;
-      } else if (application) {
-        const updated = await tx.update(applications).set({
-          draftData: input.application, consentVersion: input.consentVersion, consentedAt: changedAt,
-          phone: input.application.phone, normalizedPhone: normalizeCandidatePhone(input.application.phone), normalizedEmail: normalizeCandidateEmail(input.application.email), adultProfiles,
-          individualNetMonthlyIncomeCents: input.application.individualNetMonthlyIncomeCents,
-          householdNetMonthlyIncomeCents: input.application.householdNetMonthlyIncomeCents, adultOccupants: input.application.adultOccupants,
-          minorOccupants: input.application.minorOccupants, intendedMoveInDate: input.application.intendedMoveInDate,
-          applicationDataPromotedAt: changedAt,
-          submittedAt: changedAt, documentState: property.requestedDocumentCategories.length ? "complete" : "not_requested",
-          responsibleUserId: null, sourceLinkTokenHash: record.tokenHash, submissionKeyHash, updatedAt: changedAt,
-        }).where(and(eq(applications.id, application.id), eq(applications.tenantUserId, tenant.id), eq(applications.retentionState, "active"), isNull(applications.submittedAt))).returning();
-        if (!updated[0]) throw new ApiError(409, "APPLICATION_ALREADY_SUBMITTED", "La solicitud se ha enviado con otra operación.", { applicationId: application.id });
-        persisted = updated[0];
-      } else {
-        const applicationId = newId();
-        const inserted = await tx.insert(applications).values({
-          id: applicationId, agencyId: property.agencyId, propertyId: property.id, tenantUserId: tenant.id,
-          responsibleUserId: null, status: "new", documentState: "not_requested",
-          submittedAt: changedAt, draftData: input.application, consentVersion: input.consentVersion, consentedAt: changedAt,
-          phone: input.application.phone, normalizedPhone: normalizeCandidatePhone(input.application.phone), normalizedEmail: normalizeCandidateEmail(input.application.email), adultProfiles,
-          individualNetMonthlyIncomeCents: input.application.individualNetMonthlyIncomeCents,
-          householdNetMonthlyIncomeCents: input.application.householdNetMonthlyIncomeCents, adultOccupants: input.application.adultOccupants,
-          minorOccupants: input.application.minorOccupants, intendedMoveInDate: input.application.intendedMoveInDate,
-          applicationDataPromotedAt: changedAt,
-          sourceLinkTokenHash: record.tokenHash, submissionKeyHash, createdAt: changedAt, updatedAt: changedAt,
-        }).returning();
-        persisted = inserted[0]!;
-      }
-      await enqueueApplicationNotifications(tx, {
-        applicationId: persisted.id,
-        tenantUserId: tenant.id,
-        agencyId: record.property.agencyId,
-        tenantEmail: tenant.email,
-        propertyTitle: property.title,
-        agencyName: agencyLock[0]!.name,
-        administrators: notificationAdministrators,
-      });
-      return { missing: null, application: persisted, idempotentReplay };
-    });
+    const result = await deps.db.transaction((tx) => submitApplicationInTransaction(tx as unknown as Database, tenant, record, input, changedAt));
     if (result.missing) {
       throw new ApiError(422, "REQUESTED_DOCUMENTS_MISSING", "Añade la documentación solicitada de cada persona adulta antes de enviar.", { missingCategories: [...new Set(result.missing.flatMap((item) => item.categories))], missingByAdult: result.missing });
     }
@@ -1010,7 +1208,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
     for (const appointment of upcoming) if (!nextByApplication.has(appointment.applicationId)) nextByApplication.set(appointment.applicationId, appointment);
     return { data: { applications: rows.map((row) => ({
       ...row,
-      application: safeApplication(row.application),
+      application: agencySafeApplication(row.application),
       responsibleUserName: row.application.responsibleUserId ? responsibleNameById.get(row.application.responsibleUserId) ?? "Usuario eliminado" : null,
       nextViewing: nextByApplication.has(row.application.id) ? safeAppointment(nextByApplication.get(row.application.id)!) : null,
       possibleDuplicate: duplicateByApplication.get(row.application.id) ?? null,
@@ -1043,7 +1241,7 @@ export function registerRentalRoutes(app: FastifyInstance, deps: AppDependencies
       ...notes.map((item) => ({ id: item.note.id, type: "note_added", actorUserId: item.note.authorUserId, createdAt: item.note.createdAt, metadata: {} })),
       ...audits.filter((event) => event.action !== "application_status_changed").map((event) => ({ id: event.id, type: event.action, actorUserId: event.actorUserId, createdAt: event.createdAt, metadata: event.metadata })),
     ].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
-    return { data: { application: safeApplication(application), applicant: applicantRows[0] ?? null, responsibleUser: responsibleRows[0] ?? null, property: safeProperty(property), documents: documents.map(safeDocument), possibleDuplicate: duplicateByApplication.get(application.id) ?? null, notes: notes.map((item) => ({ ...item, authorName: item.authorName ?? "Usuario eliminado" })), statusHistory: history, appointments: viewingHistory.map(safeAppointment), activity } };
+    return { data: { application: agencySafeApplication(application), applicant: applicantRows[0] ?? null, responsibleUser: responsibleRows[0] ?? null, property: safeProperty(property), documents: documents.map(safeDocument), possibleDuplicate: duplicateByApplication.get(application.id) ?? null, notes: notes.map((item) => ({ ...item, authorName: item.authorName ?? "Usuario eliminado" })), statusHistory: history, appointments: viewingHistory.map(safeAppointment), activity } };
   });
 
   app.patch("/api/v1/agency/applications/:applicationId/status", { schema: { tags: ["Agencia"], summary: "Cambiar el estado de un interesado" } }, async (request) => {

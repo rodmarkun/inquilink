@@ -24,7 +24,7 @@ const homeStructuredData = {
       '@type': 'FAQPage',
       mainEntity: [
         { '@type': 'Question', name: '¿Los inquilinos necesitan una cuenta?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Cada interesado crea una cuenta o inicia sesión antes de completar la solicitud para guardar su progreso y consultar sus candidaturas con seguridad.' } },
-        { '@type': 'Question', name: '¿Puedo cancelar durante la prueba?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Puedes cancelar en cualquier momento desde Facturación. Verás la fecha exacta del primer cargo antes de confirmar el plan.' } },
+        { '@type': 'Question', name: '¿Puedo cancelar cuando quiera?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Puedes cancelar en cualquier momento desde Facturación. Verás la fecha exacta de cada cargo antes de confirmar el plan.' } },
         { '@type': 'Question', name: '¿Cómo funciona el enlace de cada inmueble?', acceptedAnswer: { '@type': 'Answer', text: 'Al publicar un anuncio, Inquilink genera un enlace único. Puedes copiarlo en un clic y añadirlo a cualquier portal inmobiliario o compartirlo por WhatsApp.' } },
         { '@type': 'Question', name: '¿Qué documentación pueden enviar?', acceptedAnswer: { '@type': 'Answer', text: 'Puedes solicitar nóminas, contratos laborales, justificantes para autónomos y otros documentos de solvencia en PDF, JPG o PNG.' } },
         { '@type': 'Question', name: '¿Puedo trabajar con mi equipo?', acceptedAnswer: { '@type': 'Answer', text: 'Sí. Profesional permite hasta 3 cuentas e Inmobiliaria incluye cuentas ilimitadas. Particular está limitado a una cuenta de administrador.' } },
@@ -43,8 +43,8 @@ const publicPlaceholders: Record<string, { title: string; body: string }> = {
     body: 'Accede al portal de tu inmobiliaria.',
   },
   '/registro': {
-    title: 'Prueba Inquilink gratis',
-    body: 'Crea tu espacio y empieza tus 30 días de prueba.',
+    title: 'Crea tu cuenta en Inquilink',
+    body: 'Crea tu espacio y empieza a gestionar tus alquileres hoy.',
   },
   '/aceptar-invitacion': {
     title: 'Aceptar invitación',
@@ -99,7 +99,7 @@ export function App() {
     const description = path === '/'
       ? 'Inquilink centraliza los interesados, la documentación de solvencia y las visitas de cada inmueble para agencias inmobiliarias.'
       : path === '/precios'
-        ? 'Compara los planes Particular, Profesional e Inmobiliaria de Inquilink y prueba todas las funciones durante 30 días.'
+        ? 'Compara los planes Particular, Profesional e Inmobiliaria de Inquilink y elige el que mejor se adapta a tu cartera.'
         : publicPlaceholders[path]?.body ?? 'Gestiona tu cuenta de Inquilink de forma segura.'
     document.title = fullTitle
 

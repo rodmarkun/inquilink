@@ -205,12 +205,12 @@ function LegalPriceNote({ trialEnd }: { trialEnd: string }) {
     <div className="ab-terms-note">
       <Info size={20} weight="fill" aria-hidden="true" />
       <div>
-        <strong>Condiciones del periodo gratuito</strong>
+        <strong>Condiciones de la suscripción</strong>
         <p>
-          El primer mes son 30 días consecutivos desde la activación. Se requiere tarjeta. Cancela antes del {trialEnd} para evitar el primer cargo.
+          Al confirmar el plan se realiza el primer cargo y tu suscripción queda activa. Se requiere una tarjeta válida. La próxima renovación será el {trialEnd}.
         </p>
         <p>
-          Después, el plan se renueva cada mes hasta que lo canceles. Los precios mostrados incluyen IVA en este prototipo. La política fiscal definitiva se confirmará antes del lanzamiento.
+          El plan se renueva cada mes hasta que lo canceles. Los precios mostrados incluyen IVA en este prototipo. La política fiscal definitiva se confirmará antes del lanzamiento.
         </p>
       </div>
     </div>
@@ -228,7 +228,7 @@ function PricingPage() {
       <main id="contenido" className="ab-pricing-main">
         <section className="ab-pricing-intro">
           <h1>Un plan para ordenar cada alquiler.</h1>
-          <p>Prueba todas las funciones durante 30 días. Añade tu tarjeta ahora y no pagarás nada hoy.</p>
+          <p>Todas las funciones incluidas. Elige tu plan y empieza a organizar tus alquileres hoy mismo.</p>
         </section>
 
         <section className="ab-plan-grid" aria-label="Planes disponibles">
@@ -263,7 +263,7 @@ function PricingPage() {
                   type="button"
                   onClick={() => navigate(`/registro?plan=${planId}`)}
                 >
-                  Probar {plan.name} gratis <ArrowRight size={18} aria-hidden="true" />
+                  Empezar con {plan.name} <ArrowRight size={18} aria-hidden="true" />
                 </button>
               </article>
             )
@@ -277,7 +277,7 @@ function PricingPage() {
         <section className="ab-price-footer" aria-labelledby="price-question">
           <div>
             <h2 id="price-question">Empieza sin sorpresas.</h2>
-            <p>No hay permanencia. Si cancelas durante la prueba, conservas el acceso hasta que terminen los 30 días y no se realiza ningún cargo.</p>
+            <p>No hay permanencia. Puedes cancelar cuando quieras desde Facturación y el plan no se renovará el mes siguiente.</p>
           </div>
           <a className="ab-text-link" href="/iniciar-sesion">¿Ya tienes una cuenta? Inicia sesión <ArrowRight size={17} aria-hidden="true" /></a>
         </section>
@@ -494,7 +494,7 @@ function SignupPage() {
         if (!response.ok || !payload.data?.subscription) {
           const retryableCodes = new Set(['BILLING_OPERATION_IN_PROGRESS', 'BILLING_TRANSITION_IN_PROGRESS', 'BILLING_RECONCILIATION_REQUIRED'])
           if (response.status !== 503 && !retryableCodes.has(payload.error?.code ?? '')) paymentAttemptRef.current = null
-          throw new Error(payload.error?.message ?? 'No hemos podido activar la prueba.')
+          throw new Error(payload.error?.message ?? 'No hemos podido activar tu suscripción.')
         }
         setActivation({ trialEndsAt: payload.data.subscription.trialEndsAt ?? '', paymentMethodDisplay: payload.data.subscription.paymentMethodDisplay ?? maskCard })
         paymentAttemptRef.current = null
@@ -502,7 +502,7 @@ function SignupPage() {
       setStage('success')
       window.scrollTo({ top: 0, behavior: 'smooth' })
       } catch (caught) {
-        setErrors({ form: caught instanceof Error ? caught.message : 'No hemos podido activar la prueba.' })
+        setErrors({ form: caught instanceof Error ? caught.message : 'No hemos podido activar tu suscripción.' })
         focusField('payment-form-error')
       } finally { setSubmitting(false) }
     }
@@ -518,18 +518,18 @@ function SignupPage() {
         <span>¿Ya tienes cuenta? <a href="/iniciar-sesion">Inicia sesión</a></span>
       </header>
       <main id="contenido" className="ab-signup-layout">
-        <aside className="ab-signup-aside" aria-label="Resumen de la prueba">
+        <aside className="ab-signup-aside" aria-label="Resumen del plan">
           <div className="ab-aside-content">
-            <span className="ab-eyebrow">30 días para probarlo todo</span>
+            <span className="ab-eyebrow">Tu plan, activo desde hoy</span>
             <h1>Tus alquileres, organizados desde hoy.</h1>
             <p>Crea anuncios, recibe candidatos y coordina visitas desde un único portal.</p>
             <div className="ab-aside-promise">
               <ShieldCheck size={25} weight="fill" aria-hidden="true" />
-              <div><strong>No pagas nada hoy</strong><span>Te avisaremos antes de que termine la prueba.</span></div>
+              <div><strong>Todo incluido desde el primer día</strong><span>Accede a todas las funciones de Inquilink sin límites.</span></div>
             </div>
             <div className="ab-aside-promise">
               <CalendarBlank size={25} weight="fill" aria-hidden="true" />
-              <div><strong>Primera factura el {trialEnd}</strong><span>Puedes cancelar antes desde Facturación.</span></div>
+              <div><strong>Renovación el {trialEnd}</strong><span>Puedes cancelar cuando quieras desde Facturación.</span></div>
             </div>
           </div>
         </aside>
@@ -540,7 +540,7 @@ function SignupPage() {
           {stage === 'agency' && (
             <form className="ab-form" onSubmit={submitAgency} noValidate>
               <div className="ab-form-heading">
-                <p>Empieza tu prueba gratis</p>
+                <p>Empieza hoy mismo</p>
                 <h2 ref={stageHeadingRef} tabIndex={-1}>Crea tu espacio de trabajo</h2>
                 <span>Usaremos estos datos para preparar tu cuenta de administrador.</span>
               </div>
@@ -580,7 +580,7 @@ function SignupPage() {
                 <div className="ab-field ab-field-wide">
                   <label htmlFor="signup-billingAddress">Dirección fiscal</label>
                   <input id="signup-billingAddress" autoComplete="street-address" placeholder="Calle, número, código postal y localidad" value={agency.billingAddress} onChange={(event) => updateAgency('billingAddress', event.target.value)} aria-invalid={Boolean(errors.billingAddress)} aria-describedby={errors.billingAddress ? 'signup-billingAddress-error' : 'signup-billingAddress-help'} />
-                  <span className="ab-field-help" id="signup-billingAddress-help">Estos datos se enviarán al emisor al activar la prueba y podrás sincronizar cambios desde Facturación.</span>
+                  <span className="ab-field-help" id="signup-billingAddress-help">Estos datos se enviarán al emisor al activar el plan y podrás sincronizar cambios desde Facturación.</span>
                   <FieldError id="signup-billingAddress-error">{errors.billingAddress}</FieldError>
                 </div>
                 <div className="ab-field ab-field-wide">
@@ -642,7 +642,7 @@ function SignupPage() {
               </fieldset>
               <div className="ab-trial-summary">
                 <Sparkle size={21} weight="fill" aria-hidden="true" />
-                <div><strong>Primer mes gratis (30 días)</strong><span>Hoy: 0,00 €. Primer cargo: {selectedPlan.price} el {trialEnd}.</span></div>
+                <div><strong>Plan {selectedPlan.name}</strong><span>Hoy: {selectedPlan.price}. Renovación: {selectedPlan.price} el {trialEnd}.</span></div>
               </div>
               <div className="ab-form-actions">
                 <button className="ab-button ab-button-plain" type="button" onClick={() => setStage('verify')}><ArrowLeft size={18} aria-hidden="true" /> Atrás</button>
@@ -654,9 +654,9 @@ function SignupPage() {
           {stage === 'payment' && (
             <form className="ab-form" onSubmit={submitPayment} noValidate>
               <div className="ab-form-heading">
-                <p>Activa tus 30 días gratis</p>
+                <p>Confirma tu suscripción</p>
                 <h2 ref={stageHeadingRef} tabIndex={-1}>Añade una tarjeta</h2>
-                <span>La tarjeta es obligatoria, pero hoy no realizaremos ningún cargo.</span>
+                <span>Se realizará el primer cargo al confirmar y el plan se renovará cada mes.</span>
               </div>
               {errors.form && <div className="ab-form-error" id="payment-form-error" role="alert" tabIndex={-1}><Warning size={18} weight="fill" aria-hidden="true" />{errors.form}</div>}
               <div className="ab-secure-banner"><LockKey size={19} weight="fill" aria-hidden="true" />El proveedor de pagos tokeniza la tarjeta. Inquilink nunca envía sus datos completos a la API.</div>
@@ -690,16 +690,16 @@ function SignupPage() {
               <section className="ab-order-summary" aria-labelledby="order-title">
                 <div className="ab-order-heading"><div><span id="order-title">Resumen</span><strong>Plan {selectedPlan.name}</strong></div><button type="button" onClick={() => setStage('plan')}>Cambiar</button></div>
                 <dl>
-                  <div><dt>Hoy</dt><dd>0,00 €</dd></div>
-                  <div><dt>Primer cargo, {trialEnd}</dt><dd>{selectedPlan.price}</dd></div>
-                  <div><dt>Renovación posterior</dt><dd>{selectedPlan.price} / mes</dd></div>
-                  <div><dt>Impuestos</dt><dd>Se detallarán antes del primer cargo</dd></div>
+                  <div><dt>Hoy</dt><dd>{selectedPlan.price}</dd></div>
+                  <div><dt>Renovación mensual</dt><dd>{selectedPlan.price} / mes</dd></div>
+                  <div><dt>Próxima renovación</dt><dd>{trialEnd}</dd></div>
+                  <div><dt>Impuestos</dt><dd>Se detallarán en la factura</dd></div>
                 </dl>
               </section>
-              <p className="ab-confirm-copy">Al activar la prueba autorizas la renovación mensual automática desde el {trialEnd}. Puedes cancelar antes de esa fecha desde Facturación y no se realizará el primer cargo.</p>
+              <p className="ab-confirm-copy">Al confirmar autorizas el primer cargo de hoy y la renovación mensual automática. Puedes cancelar cuando quieras desde Facturación.</p>
               <div className="ab-form-actions">
                 <button className="ab-button ab-button-plain" type="button" onClick={() => setStage('plan')}><ArrowLeft size={18} aria-hidden="true" /> Atrás</button>
-                <button className="ab-button ab-button-dark" type="submit" disabled={submitting}>{submitting ? 'Activando...' : 'Activar prueba gratis'} {!submitting && <ArrowRight size={18} aria-hidden="true" />}</button>
+                <button className="ab-button ab-button-dark" type="submit" disabled={submitting}>{submitting ? 'Activando...' : 'Confirmar y pagar'} {!submitting && <ArrowRight size={18} aria-hidden="true" />}</button>
               </div>
             </form>
           )}
@@ -707,11 +707,11 @@ function SignupPage() {
           {stage === 'success' && (
             <div className="ab-success" role="status">
               <span className="ab-success-icon"><Check size={34} weight="bold" aria-hidden="true" /></span>
-              <p>Prueba activada</p>
+              <p>Suscripción activada</p>
               <h1 ref={stageHeadingRef} tabIndex={-1}>Tu espacio está listo.</h1>
               <span>Hemos preparado {agency.agency || 'tu espacio'} con el plan {selectedPlan.name}.</span>
               <div className="ab-success-details">
-                <div><CalendarBlank size={21} aria-hidden="true" /><span><small>Prueba hasta</small><strong>{activation?.trialEndsAt ? new Intl.DateTimeFormat('es-ES').format(new Date(activation.trialEndsAt)) : trialEnd}</strong></span></div>
+                <div><CalendarBlank size={21} aria-hidden="true" /><span><small>Próxima renovación</small><strong>{activation?.trialEndsAt ? new Intl.DateTimeFormat('es-ES').format(new Date(activation.trialEndsAt)) : trialEnd}</strong></span></div>
                 <div><CreditCard size={21} aria-hidden="true" /><span><small>Tarjeta</small><strong>{activation?.paymentMethodDisplay ?? maskCard}</strong></span></div>
               </div>
               <button className="ab-button ab-button-dark ab-button-wide" type="button" onClick={() => navigate('/app')}>Entrar en mi panel <ArrowRight size={18} aria-hidden="true" /></button>
@@ -790,7 +790,7 @@ function LoginPage() {
       <a className="ab-skip-link" href="#contenido">Saltar al contenido</a>
       <header className="ab-auth-header">
         <Brand />
-        <span>¿Aún no tienes cuenta? <a href="/registro">Prueba 30 días gratis</a></span>
+        <span>¿Aún no tienes cuenta? <a href="/registro">Crea tu cuenta</a></span>
       </header>
       <main id="contenido" className="ab-login-main">
         <section className="ab-login-panel">
@@ -1208,7 +1208,7 @@ function BillingPage() {
         </aside>
         <main id="contenido" className="ab-billing-main">
           <div className="ab-page-heading">
-            <div><p>Configuración de la cuenta</p><h1>Facturación</h1><span>Consulta tu plan, tus pagos y el estado de la prueba.</span></div>
+            <div><p>Configuración de la cuenta</p><h1>Facturación</h1><span>Consulta tu plan, tus pagos y el estado de tu suscripción.</span></div>
             <button ref={paymentTriggerRef} className="ab-button ab-button-outline" type="button" onClick={() => { setPaymentOpen(true); setPaymentErrors({}); setPaymentMessage('') }}>Actualizar tarjeta</button>
           </div>
 
@@ -1216,9 +1216,9 @@ function BillingPage() {
 
           <section className={`ab-billing-hero ${cancelled ? 'is-cancelled' : ''}`} aria-labelledby="billing-plan-title">
             <div className="ab-billing-plan-copy">
-              <span className="ab-status-badge">{cancelled ? 'Cancelación programada' : 'Prueba gratuita activa'}</span>
+              <span className="ab-status-badge">{cancelled ? 'Cancelación programada' : 'Suscripción activa'}</span>
               <h2 id="billing-plan-title">Plan Inmobiliaria</h2>
-              <p>{cancelled ? `Tu acceso termina el ${trialEnd}. No se realizará ningún cargo.` : `Te quedan 30 días de prueba. El primer cargo será el ${trialEnd}.`}</p>
+              <p>{cancelled ? `Tu acceso termina el ${trialEnd}. No se realizará ningún cargo.` : `Tu plan está activo. La próxima renovación será el ${trialEnd}.`}</p>
             </div>
             <div className="ab-billing-price"><strong>99,99 €</strong><span>/ mes, IVA incluido en este prototipo</span></div>
           </section>
@@ -1240,13 +1240,13 @@ function BillingPage() {
               <span className="ab-summary-icon"><Receipt size={23} weight="fill" aria-hidden="true" /></span>
               <small>Última factura</small>
               <strong>Sin facturas todavía</strong>
-              <p>La prueba comenzó hoy</p>
+              <p>El plan comenzó hoy</p>
             </article>
           </section>
 
           <section className="ab-invoices" aria-labelledby="invoices-title">
             <div className="ab-section-heading"><div><h2 id="invoices-title">Facturas</h2><p>Tus facturas aparecerán aquí cuando comience el plan de pago.</p></div></div>
-            <div className="ab-empty-invoice"><FileText size={28} aria-hidden="true" /><div><strong>Aún no hay facturas</strong><span>Tu primer recibo estará disponible después del cobro del {trialEnd}.</span></div></div>
+            <div className="ab-empty-invoice"><FileText size={28} aria-hidden="true" /><div><strong>Aún no hay facturas</strong><span>Tu recibo estará disponible tras el cobro de la próxima renovación, el {trialEnd}.</span></div></div>
           </section>
 
           <section className="ab-cancel-zone" aria-labelledby="cancel-title">
@@ -1267,7 +1267,7 @@ function BillingPage() {
         <form className="ab-modal" onSubmit={submitPaymentUpdate} noValidate>
           <span className="ab-modal-icon ab-modal-icon-payment"><CreditCard size={25} weight="fill" aria-hidden="true" /></span>
           <h2 id="payment-dialog-title">Actualiza tu tarjeta</h2>
-          <p id="payment-dialog-description">La nueva tarjeta se usará para el primer cargo del {trialEnd}. No realizaremos ningún cargo hoy.</p>
+          <p id="payment-dialog-description">La nueva tarjeta se usará para tu próxima renovación, el {trialEnd}. No realizaremos ningún cargo hoy.</p>
           <div className="ab-modal-form">
             <div className="ab-field">
               <label htmlFor="update-card-name">Nombre en la tarjeta</label>
@@ -1307,7 +1307,7 @@ function BillingPage() {
       <ManagedDialog open={cancelOpen} onClose={() => setCancelOpen(false)} triggerRef={cancelTriggerRef} labelledBy="cancel-dialog-title" describedBy="cancel-dialog-description">
           <section className="ab-modal">
             <span className="ab-modal-icon"><Warning size={25} weight="fill" aria-hidden="true" /></span>
-            <h2 id="cancel-dialog-title">¿Quieres cancelar tu prueba?</h2>
+            <h2 id="cancel-dialog-title">¿Quieres cancelar tu suscripción?</h2>
             <p id="cancel-dialog-description">Seguirás teniendo acceso hasta el {trialEnd}. Después finalizará el acceso y no se cobrará la tarjeta.</p>
             <div className="ab-field">
               <label htmlFor="cancel-reason">¿Por qué quieres cancelar? <span>Opcional</span></label>

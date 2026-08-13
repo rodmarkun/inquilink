@@ -171,7 +171,7 @@ type DashboardApiData = {
   topProperties: { href: string; items: DashboardApiProperty[] }
 }
 
-type DashboardLoadState = 'loading' | 'remote' | 'demo' | 'error'
+type DashboardLoadState = 'loading' | 'remote' | 'demo' | 'error' | 'unauthorized'
 type LinkedRoute = { kind: 'applicant'; id: string } | { kind: 'appointment'; id: string } | null
 
 type AgencyPropertyApi = {
@@ -758,6 +758,7 @@ export function AgencyWorkspacePage() {
   const [dashboardReloadKey, setDashboardReloadKey] = useState(0)
   const [identity, setIdentity] = useState<AgencyIdentity | null>(null)
   const [remotePropertyId, setRemotePropertyId] = useState<string | null>(propertyIdFromPath)
+  const unauthorizedRedirectStarted = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -769,6 +770,13 @@ export function AgencyWorkspacePage() {
       try {
         const response = await fetch('/api/v1/agency/dashboard', { credentials: 'include', headers: { Accept: 'application/json' } })
         const contentType = response.headers.get('content-type') ?? ''
+        if (response.status === 401 || response.status === 403) {
+          if (!cancelled) {
+            if (isStandaloneDemo) setDashboardLoadState('demo')
+            else setDashboardLoadState('unauthorized')
+          }
+          return
+        }
         if (!contentType.includes('application/json')) {
           if (!cancelled) {
             if (isStandaloneDemo) setDashboardLoadState('demo')
@@ -794,6 +802,12 @@ export function AgencyWorkspacePage() {
     void loadDashboard()
     return () => { cancelled = true }
   }, [dashboardReloadKey])
+
+  useEffect(() => {
+    if (dashboardLoadState !== 'unauthorized' || unauthorizedRedirectStarted.current) return
+    unauthorizedRedirectStarted.current = true
+    window.location.replace('/iniciar-sesion?volver=' + encodeURIComponent(window.location.pathname + window.location.search))
+  }, [dashboardLoadState])
 
   useEffect(() => {
     let cancelled = false
@@ -1072,6 +1086,10 @@ export function AgencyWorkspacePage() {
           : view === 'team'
             ? 'Equipo'
             : 'Facturación'
+
+  if (dashboardLoadState === 'unauthorized') {
+    return <div className="agency-workspace" role="status" style={{ display: 'grid', placeItems: 'center' }}><p>Redirigiendo a inicio de sesión…</p></div>
+  }
 
   return (
     <div className="agency-workspace">
@@ -2898,7 +2916,7 @@ function BillingView({ remote, properties }: { remote: boolean; properties: Prop
   return <section className="agency-view">
     <PageHeading eyebrow="PLAN Y PAGOS" title="Facturación" description="Tu plan, su uso real y el método de pago del espacio de trabajo." />
     <section className="agency-billing-hero">
-      <div><span className="agency-billing-badge"><Sparkle size={15} weight="fill" />PRUEBA GRATUITA</span><h2>{plan.name}</h2><p>{plan.price} / mes después de la prueba</p></div>
+      <div><span className="agency-billing-badge"><Sparkle size={15} weight="fill" />PLAN ACTIVO</span><h2>{plan.name}</h2><p>{plan.price} / mes</p></div>
       <div><small>Próximo cargo</small><strong>{plan.price}</strong><span>{demoBilling.trialEndsOn}</span></div>
       <button className="agency-button agency-button--secondary">Gestionar plan</button>
     </section>
@@ -2914,10 +2932,10 @@ function BillingView({ remote, properties }: { remote: boolean; properties: Prop
       <section className="agency-panel-card">
         <h2>Método de pago</h2>
         <div className="agency-payment-method"><CreditCard size={25} /><span><strong>{demoBilling.card}</strong><small>Caduca {demoBilling.cardExpiry}</small></span><button className="agency-text-button">Actualizar</button></div>
-        <h2 className="agency-panel-card__second-heading">Tu prueba</h2>
-        <p>{trialDaysLeft === 1 ? 'Te queda 1 día' : `Te quedan ${trialDaysLeft} días`}. Cancela antes del {demoBilling.trialEndsOn} para evitar el primer cargo.</p>
+        <h2 className="agency-panel-card__second-heading">Tu plan</h2>
+        <p>Tu plan se renueva el {demoBilling.trialEndsOn}. {trialDaysLeft === 1 ? 'Queda 1 día' : `Quedan ${trialDaysLeft} días`} para el próximo cargo. Puedes cancelar cuando quieras desde aquí.</p>
         <div className="agency-trial-progress"><span style={{ width: `${Math.min(100, Math.round(((30 - trialDaysLeft) / 30) * 100))}%` }} /></div>
-        <small>Primer mes gratis. Se requiere tarjeta.</small>
+        <small>Renovación mensual automática. Se requiere tarjeta.</small>
       </section>
     </div>
   </section>

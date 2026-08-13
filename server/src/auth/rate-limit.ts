@@ -52,6 +52,23 @@ export async function enforceAuthRateLimits(
   await increment(deps, `${action}:account`, normalizedAccount, limits.account, now);
 }
 
+export async function enforceGuestOtpRateLimits(
+  deps: AppDependencies,
+  request: FastifyRequest,
+  normalizedEmail: string,
+): Promise<void> {
+  const now = (deps.now ?? (() => new Date()))();
+  await increment(deps, "guest_otp:ip", request.ip, { max: 15, windowMs: 60 * 60_000 }, now);
+  await increment(deps, "guest_otp:email", normalizedEmail, { max: 5, windowMs: 60 * 60_000 }, now);
+}
+
+export async function enforceGuestApplicationRateLimit(
+  deps: AppDependencies,
+  request: FastifyRequest,
+): Promise<void> {
+  await increment(deps, "guest_application:ip", request.ip, { max: 20, windowMs: 24 * 60 * 60_000 }, (deps.now ?? (() => new Date()))());
+}
+
 /** Removes expired fixed-window buckets; the raw identifiers were never stored. */
 export async function cleanupAuthRateLimits(
   db: Database,
